@@ -1,147 +1,174 @@
-# INSTRUCTIONS.md: AI Agent Designing & Coding Standards
-## Module 1: Presentation Layer & Forensic Data Visualization
+# INSTRUCTIONS.md: Module 1 Agent Build Brief
+## Presentation Layer and Forensic Data Visualization
 
 ---
 
-## 1. Module Identity & Architectural Boundary
-* **Module Name:** `module-1-frontend`
-* **Owner:** Member 1 (Frontend Lead)
-* **Framework Stack:** Next.js 14+ (App Router), React 18, TypeScript (Strict Mode), TailwindCSS, Shadcn UI / Radix UI, TanStack Query v5, Zustand.
-* **Visualization Engine:** Leaflet.js / React-Leaflet (GeoIP Relay Map), Cytoscape.js / Vis-Network (Threat Network Graph), Recharts (Risk Scoring Analytics).
-* **Isolation Guarantee:** Module 1 is strictly a Client/Presentation container. It **NEVER** communicates directly with Backend Modules 3, 4, 5, or 6. **ALL** data ingress and egress MUST strictly flow through Module 2 (Mediator API Gateway).
+## 1. Mission
+
+Build the analyst-facing Next.js application for SIH 26106. The dashboard must let a user upload raw email evidence, watch case processing status, inspect authentication and routing forensics, view a threat graph, and download forensic reports.
+
+This module must be fully buildable without Modules 2, 3, 4, 5, or 6 running. Use the interface contract in `CLAUDE.md` as the source of truth for all API shapes.
 
 ---
 
-## 2. Directory Structure & Component Layout Guidelines
+## 2. Architecture Boundary
 
-When generating or editing code for Module 1, strictly follow this layout structure:
+* Build inside `Module-1/`.
+* Do not create a nested project directory.
+* Do not import code from sibling module directories.
+* Do not call worker queues, databases, or direct engine services.
+* All live network traffic goes through Module 2 URLs only.
+* All standalone development traffic is mocked with MSW.
 
+---
+
+## 3. Required Stack
+
+* Next.js 14+ App Router
+* React 18
+* TypeScript strict mode
+* TailwindCSS
+* Shadcn UI or Radix UI primitives
+* TanStack Query v5
+* Zustand
+* Zod
+* MSW
+* Leaflet or React-Leaflet for hop maps
+* Cytoscape.js or Vis-Network for graph visualization
+* Recharts for scoring charts
+
+---
+
+## 4. File Layout
+
+Create this layout directly under `Module-1/`:
+
+```text
+app/
+  layout.tsx
+  page.tsx
+  investigate/[caseId]/page.tsx
+  investigate/[caseId]/loading.tsx
+  investigate/[caseId]/error.tsx
+  campaigns/page.tsx
+  reports/page.tsx
+components/
+  ui/
+  upload/Dropzone.tsx
+  upload/UploadProgress.tsx
+  forensics/RiskGaugeMatrix.tsx
+  forensics/HeaderBreadcrumb.tsx
+  forensics/HeaderRawInspector.tsx
+  maps/GeoHopMap.tsx
+  maps/MapControls.tsx
+  graphs/NetworkGraph.tsx
+  graphs/GraphInspector.tsx
+lib/
+  api/client.ts
+  api/endpoints.ts
+  api/schemas.ts
+  hooks/useAnalysis.ts
+  hooks/useGraphLayout.ts
+  mocks/browser.ts
+  mocks/handlers.ts
+  store/useCaseStore.ts
+  utils/formatting.ts
+  utils/geo.ts
+types/api-contracts.ts
+contracts/
+  upload-accepted.sample.json
+  analysis-result.sample.json
+  graph-data.sample.json
+tests/
 ```
-module-1-frontend/
-├── app/
-│   ├── layout.tsx                  # Dark cyber-forensic shell layout
-│   ├── page.tsx                    # Ingestion dropzone & quick audit feed
-│   ├── investigate/
-│   │   └── [caseId]/
-│   │       ├── page.tsx            # Main Incident Investigation Workbench
-│   │       ├── loading.tsx         # Skeleton loader for heavy visualizations
-│   │       └── error.tsx           # Fallback UI for rendering/network errors
-│   ├── campaigns/
-│   │   └── page.tsx            # Threat Actor & Graph Cluster Matrix
-│   └── reports/
-│       └── page.tsx            # Evidentiary PDF Export & Case Archive
-├── components/
-│   ├── ui/                         # Atomic Shadcn/Radix components (Button, Badge, Card, Dialog)
-│   ├── upload/
-│   │   ├── Dropzone.tsx            # Drag & drop for .eml / .msg with client-side mime validation
-│   │   └── UploadProgress.tsx      # Real-time parsing phase status indicator
-│   ├── forensics/
-│   │   ├── RiskGaugeMatrix.tsx     # Composite score radial gauge & breakdown bars
-│   │   ├── HeaderBreadcrumb.tsx    # SPF/DKIM/DMARC status pills and sender alignment card
-│   │   └── HeaderRawInspector.tsx  # Syntax-highlighted raw RFC header viewer with search (consumes AnalysisResult.raw_headers)
-│   ├── maps/
-│   │   ├── GeoHopMap.tsx           # Dynamic leaf-map with arc connections between IP nodes
-│   │   └── MapControls.tsx         # Layer toggle (VPN, Tor, Proxy filters)
-│   └── graphs/
-│       ├── NetworkGraph.tsx        # Cytoscape.js canvas for threat entity relationships
-│       └── GraphInspector.tsx      # Slide-over sidebar showing selected node metadata
-├── lib/
-│   ├── api/
-│   │   ├── client.ts               # Axios instance with Zod schema validation
-│   │   └── endpoints.ts            # Typed API fetchers for Module 2 Mediator
-│   ├── hooks/
-│   │   ├── useAnalysis.ts          # TanStack Query hook for case polling/SSE
-│   │   └── useGraphLayout.ts       # Layout options calculator for Cytoscape.js
-│   ├── store/
-│   │   └── useCaseStore.ts         # Zustand store for active case selection & UI state
-│   └── utils/
-│       ├── geo.ts                  # Bezier curve generators for map hop arcs
-│       └── formatting.ts           # Hash trimmers, timestamp formatters, risk score colors
-├── types/
-│   └── api-contracts.ts            # Strict TypeScript types matching Module 2 specifications
+
+---
+
+## 5. Input and Output Mapping
+
+### Inputs Consumed
+
+| Source | Transport | Data | Local owner |
+| --- | --- | --- | --- |
+| Module 2 | `POST /api/v1/cases/upload` response | `UploadAccepted` | `types/api-contracts.ts`, `lib/api/schemas.ts` |
+| Module 2 | `GET /api/v1/cases/{case_id}/analysis` | `AnalysisResult` | `useAnalysis.ts`, investigation page |
+| Module 2 | `GET /api/v1/cases/{case_id}/graph` | `NetworkGraphData` | `NetworkGraph.tsx` |
+| Module 2 | `GET /api/v1/reports/{case_id}/export` | PDF blob or JSON export | reports page |
+
+### Outputs Produced
+
+| Destination | Transport | Data | Required behavior |
+| --- | --- | --- | --- |
+| Module 2 | `POST /api/v1/cases/upload` | `.eml` and `.msg` files, `client_timestamp`, `analyst_id`, optional `client_sha256` | Reject unsupported files before upload |
+| Module 2 | `GET /api/v1/cases/{case_id}/analysis` | `case_id` path parameter | Poll while pending or processing |
+| Module 2 | `GET /api/v1/cases/{case_id}/graph` | `case_id` path parameter | Load after completed or degraded |
+| Module 2 | `GET /api/v1/reports/{case_id}/export` | `format`, `include_raw_headers` query parameters | Download without page refresh |
+
+---
+
+## 6. Implementation Requirements
+
+1. Define all TypeScript interfaces and matching Zod schemas before writing UI components.
+2. Build the API client so every response is parsed with Zod `safeParse`.
+3. Add MSW handlers that return realistic contract fixtures for upload, polling, graph, and report flows.
+4. Build the upload flow with client-side extension, size, batch count, and optional SHA-256 checks.
+5. Build the investigation workbench with separate resilient panels for risk, protocol, route map, raw headers, content findings, and graph.
+6. Dynamically import Leaflet/Cytoscape components with `ssr: false`.
+7. Persist only UI preferences under local storage key `sih_mod1_state_v1`.
+8. Keep user-facing errors sanitized and non-blocking when possible.
+
+---
+
+## 7. Design Requirements
+
+* Use a dense analyst workbench, not a marketing landing page.
+* Prioritize readable forensic evidence: hashes, headers, IPs, timestamps, scores, and graph relationships.
+* Use monospace text for hashes, IP addresses, coordinates, and RFC headers.
+* Use compact cards only for repeated case summaries or widgets.
+* Keep map and graph canvases stable with fixed responsive dimensions.
+* The UI must remain useful when one analysis section is degraded or missing.
+
+---
+
+## 8. Testing Requirements
+
+Write tests for:
+
+* Zod schema acceptance and rejection
+* Upload validation rules
+* Polling stop conditions for `COMPLETED`, `DEGRADED`, and `FAILED`
+* Offline MSW mode
+* Rendering of missing optional fields
+* Graph and map error boundary fallback states
+
+---
+
+## 9. Environment Variables
+
+```bash
+NEXT_PUBLIC_MEDIATOR_API_URL="http://localhost:8000"
+NEXT_PUBLIC_MEDIATOR_WS_URL="ws://localhost:8000/ws"
+NEXT_PUBLIC_ENABLE_MSW_MOCKS="true"
+NEXT_PUBLIC_MAX_BATCH_UPLOAD="10"
+NEXT_PUBLIC_MAX_FILE_SIZE_BYTES="26214400"
+NEXT_PUBLIC_POLL_INTERVAL_MS="2000"
+NEXT_PUBLIC_MAPBOX_TOKEN=""
 ```
 
----
-
-## 3. UI/UX Design System & Cyber-Forensic Theme Rules
-
-1. **Color Palette (Dark Cyber-Security Theme):**
-   * **Background Primary:** `bg-slate-950` (`#020617`)
-   * **Background Surface / Cards:** `bg-slate-900` (`#0f172a`) with `border-slate-800` (`#1e293b`)
-   * **Accent Primary (Cyan/Teal):** `text-cyan-400`, `bg-cyan-500/10`, `border-cyan-500/30`
-   * **Pass / Clean Indicator:** `text-emerald-400`, `bg-emerald-500/10`
-   * **Warning / Anomaly Indicator:** `text-amber-400`, `bg-amber-500/10`
-   * **Critical / Threat High:** `text-rose-500`, `bg-rose-500/10`, glowing neon accents
-   * **Entity Specific Colors (Graph Nodes):**
-     * `Email` / `Header`: `#38bdf8` (Sky Blue)
-     * `IP Address`: `#f59e0b` (Amber)
-     * `Domain`: `#a855f7` (Purple)
-     * `Threat Actor`: `#f43f5e` (Rose/Red)
-     * `Hash / Attachment`: `#10b981` (Emerald)
-
-2. **Typography & Monospace Elements:**
-   * Body Text: `font-sans` (Inter or Geist)
-   * Hashes (SHA-256), IP Addresses, RFC Headers, Coordinates: **MUST** use `font-mono` (`font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas`).
-
-3. **Dynamic SSR Handling Rules (CRITICAL):**
-   * Libraries depending on browser window objects (`leaflet`, `cytoscape`, `vis-network`) **MUST** be loaded dynamically in Next.js App Router using `next/dynamic` with `{ ssr: false }`.
-   * **Example Pattern:**
-     ```tsx
-     import dynamic from 'next/dynamic';
-     const DynamicGeoHopMap = dynamic(() => import('./GeoHopMap'), {
-       ssr: false,
-       loading: () => <MapSkeleton />
-     });
-     ```
-
-4. **Error Boundary Isolation Rules:**
-   * Heavy canvas components (`GeoHopMap` and `NetworkGraph`) **MUST** be wrapped in localized `<ErrorBoundary>` components.
-   * If a WebGL or Leaflet canvas context fails to initialize, the error MUST be isolated to that widget slot while keeping the rest of the Forensic Dashboard fully operational.
+Do not commit real API tokens.
 
 ---
 
-## 4. TypeScript & State Management Standards
+## 10. Independent Compile Gate
 
-1. **Zero `any` Policy:**
-   * All API requests, component props, and event handlers MUST be strictly typed using interfaces imported from `@/types/api-contracts`.
-   * Unhandled runtime objects must use `unknown` with Zod schema parsing.
+Run these commands from `Module-1/` before handing off:
 
-2. **Zod Runtime Validation for Module 2 Ingress:**
-   * Every response from Module 2 MUST pass through Zod parsing at the API fetcher layer (`lib/api/client.ts`) before reaching React state. This prevents backend schema changes from crashing the UI silently.
+```bash
+pnpm install
+pnpm type-check
+pnpm lint
+pnpm test
+pnpm build
+```
 
-3. **TanStack Query (React Query) Patterns:**
-   * Query Key strategy: `['cases', caseId]`, `['graph', caseId, { filter }]`, `['campaigns']`.
-   * Stale Time: 30,000ms for static case logs. Polling interval: 2,000ms during `status === 'PROCESSING'`.
-
----
-
-## 5. UI Component Implementations Guidelines
-
-### A. Drag-and-Drop Ingestion Dropzone
-* Supported MIME types: `.eml` (`message/rfc822`), `.msg` (`application/vnd.ms-outlook`).
-* Maximum File Size: 25 MB per single upload, up to 10 files batch.
-* Must compute client-side SHA-256 pre-flight hash for duplicate detection UI warning before sending to Module 2.
-
-### B. Interactive GeoIP Hop-by-Hop Trace Map
-* Render base tiles using Dark Matter tiles (e.g., CartoDB Dark Matter or Mapbox Dark).
-* Plot individual relay hops with numbered markers (1 = Origin, N = Final Recipient).
-* Render animated or dashed SVG Bezier curves connecting consecutive hops.
-* Hovering over a hop displays tooltips containing: IP, City, Country, ISP, ASN, Hop Delay (ms), and Proxy/VPN flag status.
-
-### C. Threat Network Visualizer
-* Use Cytoscape.js with `cose` or `cola` force-directed layout algorithms.
-* Provide user controls: Node search, Zoom fit, Physics toggle, Category filter checkboxes (IPs, Domains, Hashes).
-* Clicking a node opens the `<GraphInspector>` drawer without closing or re-rendering the main canvas.
-
----
-
-## 6. Testing & Quality Gate Requirements
-
-1. **Unit & Component Testing:**
-   * Vitest + React Testing Library for testing parser UI, risk gauges, and header syntax highlighter.
-2. **Mocking Infrastructure:**
-   * Mock Service Worker (MSW) handlers MUST be used in development (`NEXT_PUBLIC_ENABLE_MSW_MOCKS=true`) when Module 2 is not online locally.
-3. **Linting & Type-Checking Command:**
-   ```bash
-   pnpm type-check && pnpm lint && pnpm test
-   ```
+The build is not complete until it passes with MSW enabled and no backend modules running.

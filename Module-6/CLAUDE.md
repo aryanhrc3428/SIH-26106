@@ -1,36 +1,100 @@
-# CLAUDE.md: Synced Memory & Module Isolation Interface Contract
-## Module 6: Graph Correlation, Threat Attribution & Persistence Engine
+# CLAUDE.md: Module 6 Interface Contract
+## Module 6: Graph Correlation, Threat Attribution, and Persistence Engine
 
 ---
 
-## 1. Module Overview & Memory Context
+## 1. Contract Purpose
+
+This file is the memory contract for the agent building Module 6. Keep only information required to build the graph/persistence worker independently and integrate with Module 2 later.
+
 * **Module ID:** `MOD-06`
-* **Purpose:** Entity Extraction, Neo4j Graph Topology Construction, Attack Campaign Clustering, Composite Risk Score Calculation, PostgreSQL Audit Logging, Elasticsearch Full-Text Indexing.
-* **Current Version:** `1.0.0-prod`
-* **Owner:** Member 6 (Backend Dev 4)
-* **Ingress Queue:** `queue_graph_attribution`
-* **Orchestrator Target:** Module 2 (Mediator Celery Chord Callback)
+* **Build root:** `Module-6/` (create app files directly here; do not create a nested `module-6-graph-attribution/` directory)
+* **Primary role:** Consume results from Modules 3, 4, and 5, build graph entities, persist case evidence, find related campaigns, calculate final composite risk, and return graph/report metadata to Module 2
+* **Consumes from:** Module 2 Celery chord callback arguments
+* **Produces to:** Module 2 Celery result payload and storage side effects
+* **Owns writes to:** Neo4j, PostgreSQL, and Elasticsearch
+* **Never does:** Public HTTP serving, frontend rendering, raw email parsing beyond fallback metadata extraction, GeoIP enrichment, NLP inference, or Module 2 API aggregation
+
+Before coding, read `../Architecture_and_Plan.md` and `INSTRUCTIONS.md`.
 
 ---
 
-## 2. Ingress Interface Schema (Task Arguments from Module 2)
+## 2. Required Independence
 
-Module 6 listens on Celery signature `tasks.module6_graph_correlation_and_persist`.
+Module 6 must compile, run, and pass tests without any other module running.
 
-**Task Parameter Signature (Chord Callback):**
+* Tests must use local contract fixtures that represent Module 3, Module 4, and Module 5 outputs.
+* Database clients must be wrapped behind repositories that can be mocked.
+* Unit tests must pass without live Neo4j, PostgreSQL, Elasticsearch, Redis, or sibling modules.
+* Integration tests may use Docker Compose, but they are not required for the compile gate.
+* All writes must be idempotent so a repeated case does not duplicate nodes or records.
+
+---
+
+## 3. Input Mapping: Callback Arguments from Module 2
+
+**Task name:** `tasks.module6_graph_correlation_and_persist`
+
+**Queue:** `queue_graph_attribution`
+
 ```python
-def module6_graph_correlation_and_persist(results: list[dict[str, Any]], case_id: str) -> dict[str, Any]:
+def module6_graph_correlation_and_persist(
+    results: list[dict[str, object]],
+    case_id: str,
+) -> dict[str, object]:
     ...
 ```
 
-* `results`: List of dictionary payloads returned from upstream parallel tasks (`Module 3`, `Module 4`, `Module 5`).
-* `case_id`: UUID string identifying the investigation case.
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `results` | `list[dict[str, object]]` | Yes | Celery chord results from Modules 3, 4, and 5 |
+| `case_id` | `str` | Yes | Case UUID assigned by Module 2 |
+
+Module 6 must identify each result by its fields and/or `source_module` if Module 2 adds one. Do not depend on list order only.
+
+### 3.1 Required Fields Consumed from Module 3
+
+| Field | Use |
+| --- | --- |
+| `case_id` | Case identity |
+| `status` | Degraded-input detection |
+| `subject` | Email node and report metadata |
+| `timestamp` | Email node timeline |
+| `hashes.sha256`, `hashes.md5` | Evidence identity |
+| `attachment_hashes` | Attachment nodes |
+| `sender_alignment.header_from` | Sender and domain nodes |
+| `sender_alignment.reply_to` | Reply-to sender node |
+| `raw_hop_chain` | Relay IP relationships |
+| `raw_headers` | Elasticsearch full-text index |
+| `header_anomaly_score` | Composite score input |
+
+### 3.2 Required Fields Consumed from Module 4
+
+| Field | Use |
+| --- | --- |
+| `case_id` | Case identity |
+| `status` | Degraded-input detection |
+| `geo_risk_score` | Composite score input |
+| `earliest_reliable_ip` | Origin IP relationship |
+| `hops` | IP nodes and relay relationships |
+| `domain_intel` | Domain node properties and typosquat flags |
+
+### 3.3 Required Fields Consumed from Module 5
+
+| Field | Use |
+| --- | --- |
+| `case_id` | Case identity |
+| `status` | Degraded-input detection |
+| `content_suspicion_score` | Composite score input |
+| `classification`, `confidence`, `urgency_score` | Case metadata and scoring rationale |
+| `text_summary` | Report metadata and Elasticsearch index |
+| `extracted_urls` | URL nodes and relationships |
 
 ---
 
-## 3. Egress Interface Schema (Return Payload to Module 2)
+## 4. Output Mapping: Result Returned to Module 2
 
-Module 6 MUST return a dictionary adhering to this exact JSON schema upon task completion:
+Return this shape after graph correlation and persistence.
 
 ```json
 {
@@ -48,11 +112,22 @@ Module 6 MUST return a dictionary adhering to this exact JSON schema upon task c
   },
   "nodes_created": 12,
   "relationships_created": 15,
-  "graph_metrics": {
-    "graph_reputation_score": 88.0,
-    "nodes_created": 12,
-    "relationships_created": 15,
-    "linked_campaign": {
+  "graph_projection": {
+    "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+    "nodes": [
+      {
+        "id": "email_case_550e8400",
+        "label": "Urgent Wire Transfer Request",
+        "type": "EMAIL",
+        "properties": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "threat_level": "CRITICAL"
+        },
+        "risk_score": 88.75
+      }
+    ],
+    "edges": [],
+    "campaign_summary": {
       "campaign_id": "cmp_991823",
       "campaign_name": "Operation Fake Invoice Alpha",
       "total_linked_emails": 42,
@@ -68,57 +143,116 @@ Module 6 MUST return a dictionary adhering to this exact JSON schema upon task c
 }
 ```
 
----
+### 4.1 Field Rules
 
-## 4. Local Environment Variables (`.env`)
+| Field | Rule |
+| --- | --- |
+| `status` | `SUCCESS`, `DEGRADED`, or `FAILED` |
+| `composite_score` | Float from `0.0` to `100.0`, clamped |
+| `threat_level` | `CLEAN`, `SUSPICIOUS`, `HIGH_RISK`, or `CRITICAL` |
+| `graph_reputation_score` | Float from `0.0` to `100.0`, clamped |
+| `linked_campaign` | `null` when no campaign is linked |
+| `graph_projection` | Module 1 compatible graph payload for Module 2 to proxy or cache |
+| `persistence_status` | Boolean status for each owned persistence target |
 
-```bash
-# Redis Queue Target
-REDIS_URL="redis://localhost:6379/0"
-CELERY_BROKER_URL="redis://localhost:6379/0"
-CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+### 4.2 Failure Shape
 
-# Neo4j Graph Database
-NEO4J_URI="bolt://localhost:7687"
-NEO4J_USER="neo4j"
-NEO4J_PASSWORD="password"
-NEO4J_MAX_POOL_SIZE=50
+If a non-critical persistence target fails, return `DEGRADED` and preserve successful writes.
 
-# PostgreSQL
-POSTGRES_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/sih_forensics"
-
-# Elasticsearch
-ELASTICSEARCH_URL="http://localhost:9200"
-ES_INDEX_NAME="sih_email_forensics_v1"
-
-# Staging Storage
-EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
+```json
+{
+  "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+  "status": "DEGRADED",
+  "composite_score": 70.0,
+  "threat_level": "HIGH_RISK",
+  "graph_reputation_score": 0.0,
+  "linked_campaign": null,
+  "nodes_created": 0,
+  "relationships_created": 0,
+  "graph_projection": {
+    "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+    "nodes": [],
+    "edges": [],
+    "campaign_summary": null
+  },
+  "persistence_status": {
+    "postgres_saved": true,
+    "elasticsearch_indexed": false,
+    "neo4j_synced": false
+  },
+  "error": {
+    "code": "PARTIAL_PERSISTENCE_FAILURE",
+    "message": "One or more persistence targets were unavailable.",
+    "recoverable": true
+  }
+}
 ```
 
+Use `FAILED` only when no valid case identity exists or all required input payloads are unusable.
+
 ---
 
-## 5. Isolated Running & Testing Commands
+## 5. Graph Contract
 
-To run and verify Module 6 in total isolation:
+Required node labels:
 
-```bash
-# 1. Start Support Infrastructure (Redis, Neo4j, Postgres, ES) via Docker
-docker-compose up -d redis neo4j postgres elasticsearch
-
-# 2. Install Dependencies
-pip install -r requirements.txt
-
-# 3. Start Module 6 Celery Worker
-celery -A app.core.celery_app worker --loglevel=info -Q queue_graph_attribution
-
-# 4. Run Pytest Suite
-pytest tests/ -v
+```text
+Email, Sender, Domain, IPAddress, URL, Attachment, Campaign, ThreatActor
 ```
 
+Required relationship types:
+
+```text
+HAS_SENDER, BELONGS_TO, SENT_VIA_IP, RELAYED_THROUGH, HAS_REPLY_TO, CONTAINS_LINK, HAS_ATTACHMENT, LINKED_TO_CAMPAIGN, ATTRIBUTED_TO
+```
+
+All Cypher writes must use `MERGE`, not `CREATE`.
+
+When building `graph_projection`, map internal graph labels to Module 1 node types:
+
+| Internal label | Projection type |
+| --- | --- |
+| `Email` | `EMAIL` |
+| `Sender` | `SENDER` |
+| `Domain` | `DOMAIN` |
+| `IPAddress` | `IP` |
+| `URL` | `URL` |
+| `Attachment` | `ATTACHMENT_HASH` |
+| `Campaign` | `CAMPAIGN` |
+| `ThreatActor` | `THREAT_ACTOR` |
+
 ---
 
-## 6. Zero-Coupling Cross-Module Fault Isolation Rules
+## 6. Scoring Contract
 
-1. **Exclusive Persistence Owner:** Modules 1, 2, 3, 4, and 5 DO NOT write directly to Neo4j, PostgreSQL, or Elasticsearch. Module 6 holds sole write responsibility to ensure database write locks and transaction integrity are maintained.
-2. **Idempotent Graph Insertion:** Every Cypher write statement MUST use `MERGE` clauses so re-running an email case does not create duplicate nodes or corrupt network relationships.
-3. **Database Fallback Resilience:** If Elasticsearch is unavailable, Module 6 logs an index warning, continues with PostgreSQL and Neo4j commits, and reports `elasticsearch_indexed: false` without crashing the pipeline.
+```text
+composite_score =
+  header_anomaly_score * 0.25 +
+  geo_risk_score * 0.25 +
+  content_suspicion_score * 0.30 +
+  graph_reputation_score * 0.20
+```
+
+Threat levels:
+
+| Score range | Threat level |
+| --- | --- |
+| `0.0 - 29.9` | `CLEAN` |
+| `30.0 - 59.9` | `SUSPICIOUS` |
+| `60.0 - 84.9` | `HIGH_RISK` |
+| `85.0 - 100.0` | `CRITICAL` |
+
+---
+
+## 7. Standalone Completion Gate
+
+Module 6 is ready only when these pass from inside `Module-6/`:
+
+```bash
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.core.celery_app import celery_app; print(celery_app.main)"
+```
+
+The test suite must pass with mocked repositories and no sibling modules running.

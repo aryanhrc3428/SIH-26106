@@ -1,127 +1,175 @@
-# CLAUDE.md: Synced Memory & Module Isolation Interface Contract
-## Module 1: Presentation Layer & Forensic Data Visualization
+# CLAUDE.md: Module 1 Interface Contract
+## Module 1: Presentation Layer and Forensic Visualization
 
 ---
 
-## 1. Module Overview & Memory Context
+## 1. Contract Purpose
+
+This file is the memory contract for the agent building Module 1. Keep only information required to build the frontend independently and integrate with Module 2 later.
+
 * **Module ID:** `MOD-01`
-* **Purpose:** Frontend Web Dashboard, User Interface, Interactive Map Visualizations, Threat Graph Canvas, and Forensic PDF Report Trigger.
-* **Current Version:** `1.0.0-prod`
-* **Owner:** Member 1 (Frontend Lead)
-* **Downstream Integration Target:** Module 2 (Mediator API Gateway)
+* **Build root:** `Module-1/` (create app files directly here; do not create a nested `module-1-frontend/` directory)
+* **Primary role:** Analyst web dashboard, upload UI, case investigation workbench, hop map, graph viewer, risk matrix, and report download trigger
+* **Consumes from:** Module 2 only
+* **Produces to:** Module 2 only
+* **Never depends on:** Celery, Redis, PostgreSQL, Neo4j, Elasticsearch, or direct calls to Modules 3, 4, 5, or 6
+
+Before coding, read `../Architecture_and_Plan.md` and `INSTRUCTIONS.md`.
 
 ---
 
-## 2. Ingress Interface Schema (Inputs from Module 2 Gateway)
+## 2. Required Independence
 
-Module 1 expects Module 2 (Mediator) to provide the following REST API endpoints and payload schemas.
+Module 1 must compile, run, and pass tests without any other module running.
 
-### A. Endpoint: `GET /api/v1/cases/{case_id}/analysis`
-**Response Payload Contract (`AnalysisResult`):**
+* Use Mock Service Worker (MSW) for all Module 2 responses during standalone development.
+* Store contract fixtures under `contracts/` or `tests/fixtures/`.
+* Route every network call through one typed API client.
+* Validate every response with Zod before passing data to React components.
+* If Module 2 is unavailable or returns invalid data, render a degraded UI state instead of throwing.
+
+---
+
+## 3. Input Mapping: Data Consumed from Module 2
+
+### 3.1 Upload Response
+
+Module 1 sends files to Module 2 and receives this response.
+
+**Endpoint:** `POST /api/v1/cases/upload`
+
+```typescript
+export interface UploadAccepted {
+  batch_id: string;
+  cases: Array<{
+    case_id: string;
+    file_name: string;
+    sha256_hash: string;
+    status: 'PENDING' | 'PROCESSING';
+    estimated_duration_ms: number;
+  }>;
+}
+```
+
+### 3.2 Case Analysis
+
+**Endpoint:** `GET /api/v1/cases/{case_id}/analysis`
+
 ```typescript
 export interface AnalysisResult {
   case_id: string;
   file_name: string;
   sha256_hash: string;
   md5_hash?: string;
-  timestamp: string; // ISO 8601
+  timestamp: string;
   subject?: string;
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'DEGRADED' | 'FAILED';
   processing_time_ms: number;
-  raw_headers?: string; // Full raw RFC 822 headers for inspector viewer
-  
-  // Composite Risk Metrics
-  risk_matrix: {
-    composite_score: number; // 0 - 100
-    threat_level: 'CLEAN' | 'SUSPICIOUS' | 'HIGH_RISK' | 'CRITICAL';
-    breakdown: {
-      header_anomaly_score: number; // 0 - 100
-      content_suspicion_score: number; // 0 - 100
-      geo_risk_score: number; // 0 - 100
-      graph_reputation_score: number; // 0 - 100
-    };
-    flags: Array<{
-      code: string;
-      severity: 'INFO' | 'WARNING' | 'CRITICAL';
-      message: string;
-      source_module: 'HEADER' | 'GEOIP' | 'NLP' | 'GRAPH';
-    }>;
-  };
+  raw_headers?: string;
+  risk_matrix: RiskMatrix;
+  protocol_forensics: ProtocolForensics;
+  routing_topology: RoutingTopology;
+  content_analysis: ContentAnalysis;
+  linked_campaign?: LinkedCampaign | null;
+}
 
-  // Header & Protocol Authentication (From Module 3 via Mediator)
-  protocol_forensics: {
-    spf: { status: 'PASS' | 'FAIL' | 'SOFTFAIL' | 'NEUTRAL' | 'NONE' | 'TEMPERROR' | 'PERMERROR'; domain: string; ip: string };
-    dkim: { status: 'PASS' | 'FAIL' | 'NONE'; selector: string; domain: string };
-    dmarc: { status: 'PASS' | 'FAIL' | 'NONE'; policy: 'reject' | 'quarantine' | 'none'; alignment: boolean };
-    sender_alignment: {
-      header_from: string;
-      envelope_from: string;
-      reply_to: string | null;
-      is_display_name_spoofed: boolean;
-      spoofed_entity_detected: string | null;
-    };
+export interface RiskMatrix {
+  composite_score: number;
+  threat_level: 'CLEAN' | 'SUSPICIOUS' | 'HIGH_RISK' | 'CRITICAL';
+  breakdown: {
+    header_anomaly_score: number;
+    content_suspicion_score: number;
+    geo_risk_score: number;
+    graph_reputation_score: number;
   };
+  flags: Array<{
+    code: string;
+    severity: 'INFO' | 'WARNING' | 'CRITICAL';
+    message: string;
+    source_module: 'MOD-02' | 'MOD-03' | 'MOD-04' | 'MOD-05' | 'MOD-06';
+  }>;
+}
 
-  // GeoIP Hop Chain & Domain Intel (From Module 4 via Mediator)
-  routing_topology: {
-    total_hops: number;
-    earliest_reliable_ip: string;
-    origin_country: string;
-    origin_city: string;
-    hops: Array<{
-      hop_index: number;
-      ip: string;
-      hostname: string | null;
-      country: string;
-      city: string;
-      latitude: number;
-      longitude: number;
-      isp: string;
-      asn: string;
-      is_vpn_or_proxy: boolean;
-      is_tor_exit_node: boolean;
-      delay_from_prev_ms: number | null;
-    }>;
-    domain_intel?: {
-      domain: string;
-      domain_age_days: number | null;
-      registrar: string | null;
-      is_newly_registered: boolean;
-      is_typosquatted: boolean;
-      target_brand_spoofed: string | null;
-    };
+export interface ProtocolForensics {
+  spf: { status: 'PASS' | 'FAIL' | 'SOFTFAIL' | 'NEUTRAL' | 'NONE' | 'TEMPERROR' | 'PERMERROR'; domain: string | null; ip: string | null };
+  dkim: { status: 'PASS' | 'FAIL' | 'NONE' | 'TEMPERROR'; selector: string | null; domain: string | null };
+  dmarc: { status: 'PASS' | 'FAIL' | 'NONE' | 'TEMPERROR'; policy: 'reject' | 'quarantine' | 'none' | null; alignment: boolean };
+  sender_alignment: {
+    header_from: string | null;
+    envelope_from: string | null;
+    reply_to: string | null;
+    is_display_name_spoofed: boolean;
+    spoofed_entity_detected: string | null;
   };
+}
 
-  // NLP Content Assessment (From Module 5 via Mediator)
-  content_analysis: {
-    classification: 'LEGITIMATE' | 'PHISHING' | 'BEC_FINANCIAL' | 'CREDENTIAL_HARVESTING' | 'IMPERSONATION';
-    confidence: number; // 0.0 to 1.0
-    detected_language: string;
-    urgency_score: number; // 0 - 100
-    text_summary?: string;
-    extracted_urls: Array<{
-      original_url: string;
-      final_redirect_url: string;
-      domain_age_days: number | null;
-      is_suspicious_tld: boolean;
-      risk_score: number;
-    }>;
-  };
+export interface RoutingTopology {
+  total_hops: number;
+  earliest_reliable_ip: string | null;
+  origin_country: string | null;
+  origin_city: string | null;
+  hops: Array<{
+    hop_index: number;
+    ip: string;
+    hostname: string | null;
+    country: string | null;
+    city: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    isp: string | null;
+    asn: string | null;
+    is_vpn_or_proxy: boolean;
+    is_tor_exit_node: boolean;
+    delay_from_prev_ms: number | null;
+  }>;
+  domain_intel?: DomainIntel | null;
+}
+
+export interface DomainIntel {
+  domain: string | null;
+  domain_age_days: number | null;
+  registrar: string | null;
+  is_newly_registered: boolean;
+  is_typosquatted: boolean;
+  target_brand_spoofed: string | null;
+}
+
+export interface ContentAnalysis {
+  classification: 'LEGITIMATE' | 'PHISHING' | 'BEC_FINANCIAL' | 'CREDENTIAL_HARVESTING' | 'IMPERSONATION' | 'UNKNOWN';
+  confidence: number;
+  detected_language: string | null;
+  urgency_score: number;
+  text_summary?: string | null;
+  extracted_urls: Array<{
+    original_url: string;
+    final_redirect_url: string | null;
+    domain_age_days: number | null;
+    is_suspicious_tld: boolean;
+    risk_score: number;
+  }>;
+}
+
+export interface LinkedCampaign {
+  campaign_id: string;
+  campaign_name: string;
+  total_linked_emails: number;
+  first_seen?: string;
+  last_seen?: string;
 }
 ```
 
----
+### 3.3 Graph Data
 
-### B. Endpoint: `GET /api/v1/cases/{case_id}/graph`
-**Response Payload Contract (`NetworkGraphData`):**
+**Endpoint:** `GET /api/v1/cases/{case_id}/graph`
+
 ```typescript
 export interface NetworkGraphData {
   case_id: string;
   nodes: Array<{
     id: string;
     label: string;
-    type: 'EMAIL' | 'SENDER' | 'IP' | 'DOMAIN' | 'ATTACHMENT_HASH' | 'CAMPAIGN' | 'THREAT_ACTOR';
-    properties: Record<string, string | number | boolean>;
+    type: 'EMAIL' | 'SENDER' | 'IP' | 'DOMAIN' | 'URL' | 'ATTACHMENT_HASH' | 'CAMPAIGN' | 'THREAT_ACTOR';
+    properties: Record<string, string | number | boolean | null>;
     risk_score?: number;
   }>;
   edges: Array<{
@@ -131,88 +179,65 @@ export interface NetworkGraphData {
     relationship: 'HAS_SENDER' | 'SENT_VIA_IP' | 'RELAYED_THROUGH' | 'HAS_REPLY_TO' | 'CONTAINS_LINK' | 'HAS_ATTACHMENT' | 'LINKED_TO_CAMPAIGN' | 'BELONGS_TO';
     weight?: number;
   }>;
-  campaign_summary?: {
-    campaign_id: string;
-    campaign_name: string;
-    total_linked_emails: number;
-    first_seen: string;
-    last_seen: string;
-  };
+  campaign_summary?: LinkedCampaign | null;
 }
 ```
 
 ---
 
-## 3. Egress Interface Schema (Outputs from Module 1 to Module 2)
+## 4. Output Mapping: Requests Sent to Module 2
 
-Module 1 sends requests to Module 2 in these exact formats:
+### 4.1 Upload Raw Evidence
 
-### A. Endpoint: `POST /api/v1/cases/upload`
+**Endpoint:** `POST /api/v1/cases/upload`
+
 * **Content-Type:** `multipart/form-data`
-* **Payload Fields:**
-  * `files`: Binary stream array (`.eml` / `.msg`)
-  * `client_timestamp`: ISO 8601 string
-  * `analyst_id`: string (from JWT session)
+* **Fields:**
+  * `files`: array of `.eml` or `.msg` files, max 10 files, max 25 MB each
+  * `client_timestamp`: ISO 8601 timestamp
+  * `analyst_id`: string from authenticated session or standalone mock analyst
+  * `client_sha256`: optional pre-flight SHA-256 hash per file
 
-### B. Endpoint: `GET /api/v1/reports/{case_id}/export`
-* **Query Parameters:** `format=pdf|json&include_raw_headers=true`
-* **Response:** Binary Blob (PDF file) or JSON payload for downloading.
+### 4.2 Poll Case Analysis
 
----
+**Endpoint:** `GET /api/v1/cases/{case_id}/analysis`
 
-## 4. Local Environment Variables (`.env.local`)
+Module 1 should poll every `NEXT_PUBLIC_POLL_INTERVAL_MS` while status is `PENDING` or `PROCESSING`, then stop polling for `COMPLETED`, `DEGRADED`, or `FAILED`.
 
-```bash
-# Gateway Endpoint (Module 2)
-NEXT_PUBLIC_MEDIATOR_API_URL="http://localhost:8000"
-NEXT_PUBLIC_MEDIATOR_WS_URL="ws://localhost:8000/ws"
+### 4.3 Load Graph Data
 
-# Map Tile Authorization
-NEXT_PUBLIC_MAPBOX_TOKEN="pk.sample_token_for_forensic_map"
+**Endpoint:** `GET /api/v1/cases/{case_id}/graph`
 
-# MSW Mocking Trigger (Set to true when running standalone without Module 2 backend)
-NEXT_PUBLIC_ENABLE_MSW_MOCKS="false"
+Use only after a case has reached `COMPLETED` or `DEGRADED`.
 
-# UI Configuration
-NEXT_PUBLIC_MAX_BATCH_UPLOAD="10"
-NEXT_PUBLIC_POLL_INTERVAL_MS="2000"
-```
+### 4.4 Export Report
+
+**Endpoint:** `GET /api/v1/reports/{case_id}/export`
+
+* **Query parameters:** `format=pdf|json`, `include_raw_headers=true|false`
+* **PDF response:** binary blob
+* **JSON response:** same evidence data as `AnalysisResult` plus chain-of-custody metadata
 
 ---
 
-## 5. Isolated Running & Testing Commands
+## 5. Failure Handling Contract
 
-To run and verify Module 1 in total isolation on any machine:
+* Unknown JSON fields from Module 2 must be ignored.
+* Missing required fields must create a Zod parse error that is converted into a visible non-blocking warning.
+* Backend unavailable states must show an offline banner and keep mock-mode navigation usable.
+* Canvas failures in map or graph views must be isolated to that widget.
+* User-facing messages must not expose stack traces, secrets, file system paths, or raw JWT values.
+
+---
+
+## 6. Standalone Completion Gate
+
+Module 1 is ready only when these pass from inside `Module-1/`:
 
 ```bash
-# 1. Install Dependencies
 pnpm install
-
-# 2. Run Standalone Development Server with MSW Mock Data
-pnpm dev:mock
-
-# 3. Type Checking & Code Formatting
 pnpm type-check
 pnpm lint
-
-# 4. Run Vitest Unit Tests
-pnpm test:unit
-
-# 5. Production Build Verification
+pnpm test
 pnpm build
-pnpm start
 ```
-
----
-
-## 6. Zero-Coupling Cross-Module Fault Isolation Rules
-
-1. **Schema Drift Guardrail:**
-   * If Module 2 returns unexpected JSON fields or missing keys, Module 1 **MUST NOT** throw unhandled React render exceptions.
-   * All API calls must route through Zod safe-parsing wrappers in `@/lib/api/client.ts`. If parsing fails, fall back to a gracefully degraded UI state with a non-blocking toast warning (`"Data field warning from Gateway"`).
-
-2. **Backend Unavailability Resilience:**
-   * If Module 2 is down (HTTP 502/503/Connection Refused), Module 1 renders a persistent offline status bar at the top of the workbench, offering an **"Enable Offline Mock Mode"** button so analysts/judges can still evaluate UI features using MSW local snapshots.
-
-3. **Memory & Storage Boundaries:**
-   * All local state persistence (active view tab, graph node selections, map layer toggles) is scoped strictly under local storage key `sih_mod1_state_v1`.

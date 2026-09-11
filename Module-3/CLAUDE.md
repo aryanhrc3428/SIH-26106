@@ -1,36 +1,62 @@
-# CLAUDE.md: Synced Memory & Module Isolation Interface Contract
-## Module 3: Header Parsing & Protocol Forensics Engine
+# CLAUDE.md: Module 3 Interface Contract
+## Module 3: Header Parsing and Protocol Forensics Engine
 
 ---
 
-## 1. Module Overview & Memory Context
+## 1. Contract Purpose
+
+This file is the memory contract for the agent building Module 3. Keep only information required to build the header forensics worker independently and integrate with Module 2 later.
+
 * **Module ID:** `MOD-03`
-* **Purpose:** RFC Header Parsing, Multi-Hop Chain Extraction, SPF/DKIM/DMARC Protocol Forensics, Display Name Spoofing Detection.
-* **Current Version:** `1.0.0-prod`
-* **Owner:** Member 3 (Backend Dev 1)
-* **Ingress Queue:** `queue_header_forensics`
-* **Orchestrator Target:** Module 2 (Mediator Celery Chord)
+* **Build root:** `Module-3/` (create app files directly here; do not create a nested `module-3-header-forensics/` directory)
+* **Primary role:** Parse raw `.eml` and `.msg` evidence, extract headers and attachment hashes, reconstruct hop chains, verify SPF/DKIM/DMARC, and score header anomalies
+* **Consumes from:** Module 2 Celery task arguments
+* **Produces to:** Module 2 Celery result payload
+* **Never depends on:** Module 1, Module 4, Module 5, Module 6, databases, HTTP APIs, or graph storage
+
+Before coding, read `../Architecture_and_Plan.md` and `INSTRUCTIONS.md`.
 
 ---
 
-## 2. Ingress Interface Schema (Task Arguments from Module 2)
+## 2. Required Independence
 
-Module 3 listens on Celery signature `tasks.module3_header_analysis`.
+Module 3 must compile, run, and pass tests without any other module running.
 
-**Task Parameter Signature:**
+* Accept only serialized Celery task arguments and local evidence files.
+* Include local `.eml` fixtures for valid, spoofed, malformed, and multi-hop cases.
+* Unit tests must call parsing services and the Celery task directly in eager mode.
+* DNS lookups must have strict timeouts and mockable resolver wrappers.
+* No direct HTTP requests are allowed.
+
+---
+
+## 3. Input Mapping: Task Arguments from Module 2
+
+**Task name:** `tasks.module3_header_analysis`
+
+**Queue:** `queue_header_forensics`
+
 ```python
-def module3_header_analysis(case_id: str, file_path: str) -> dict[str, Any]:
+def module3_header_analysis(case_id: str, file_path: str) -> dict[str, object]:
     ...
 ```
 
-* `case_id`: UUID string identifying the investigation case.
-* `file_path`: Local disk path to the staged raw `.eml` or `.msg` file.
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `case_id` | `str` | Yes | Case UUID assigned by Module 2 |
+| `file_path` | `str` | Yes | Path to staged `.eml` or `.msg` evidence file under `EVIDENCE_STAGING_DIR` |
+
+Input file rules:
+
+* `.eml` files must be parsed as RFC 822/2822 messages.
+* `.msg` files must be converted with `extract-msg` or an equivalent local parser before header analysis.
+* Hashes must be calculated from the original raw file bytes before parsing or conversion.
 
 ---
 
-## 3. Egress Interface Schema (Return Payload to Module 2)
+## 4. Output Mapping: Result Returned to Module 2
 
-Module 3 MUST return a dictionary adhering to this exact JSON schema upon task completion:
+Return this shape for successful analysis.
 
 ```json
 {
@@ -80,48 +106,62 @@ Module 3 MUST return a dictionary adhering to this exact JSON schema upon task c
 }
 ```
 
----
+### 4.1 Field Rules
 
-## 4. Local Environment Variables (`.env`)
+| Field | Rule |
+| --- | --- |
+| `status` | `SUCCESS`, `DEGRADED`, or `FAILED` |
+| `timestamp` | ISO 8601 UTC if parsable, otherwise `null` with `status=DEGRADED` |
+| `hashes.sha256` | Required for any readable file |
+| `hashes.md5` | Required for compatibility with forensic tools |
+| `attachment_hashes` | Empty array when there are no attachments |
+| `raw_hop_chain` | Chronological order, origin first, destination last |
+| `raw_headers` | Complete raw header block only, not full body |
+| `header_anomaly_score` | Float from `0.0` to `100.0`, clamped |
 
-```bash
-# Redis Queue Target
-REDIS_URL="redis://localhost:6379/0"
-CELERY_BROKER_URL="redis://localhost:6379/0"
-CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+### 4.2 Failure Shape
 
-# DNS Guardrails
-DNS_TIMEOUT_SECONDS=2.0
-DNS_CUSTOM_NAMESERVERS="1.1.1.1,8.8.8.8"
+If the file cannot be read or parsed enough to calculate hashes, return:
 
-# Staging Storage
-EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
+```json
+{
+  "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+  "status": "FAILED",
+  "error": {
+    "code": "UNREADABLE_EVIDENCE",
+    "message": "Evidence file could not be read or parsed.",
+    "recoverable": false
+  }
+}
 ```
 
+If the file is readable but one protocol check fails because of timeout or malformed DNS data, return `status=DEGRADED` and include every field that can be safely computed.
+
 ---
 
-## 5. Isolated Running & Testing Commands
+## 5. Scoring Contract
 
-To run and verify Module 3 in total isolation:
+Calculate `header_anomaly_score` using these weights, then clamp at `100.0`.
+
+| Signal | Weight |
+| --- | ---: |
+| SPF `FAIL` or `PERMERROR` | 25 |
+| DKIM `FAIL` | 25 |
+| DMARC `FAIL` | 20 |
+| Display name spoofing | 20 |
+| Forged or missing `Message-ID` | 10 |
+
+---
+
+## 6. Standalone Completion Gate
+
+Module 3 is ready only when these pass from inside `Module-3/`:
 
 ```bash
-# 1. Ensure Redis is running
-docker run -d -p 6379:6379 --name sih_redis redis:alpine
-
-# 2. Install Dependencies
-pip install -r requirements.txt
-
-# 3. Start Module 3 Celery Worker
-celery -A app.core.celery_app worker --loglevel=info -Q queue_header_forensics
-
-# 4. Run Pytest Suite
-pytest tests/ -v
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.core.celery_app import celery_app; print(celery_app.main)"
 ```
 
----
-
-## 6. Zero-Coupling Cross-Module Fault Isolation Rules
-
-1. **Stateless Operations:** Module 3 does not hold database connection pools or maintain session state across tasks. Each task runs independently given a `file_path`.
-2. **DNS Cache Isolation:** Use local in-memory LRU caching (`functools.lru_cache`) for DNS lookups within task life to avoid repetitive external lookups.
-3. **No Direct HTTP Calls:** Module 3 must never perform outbound HTTP/HTTPS requests to external services. All network activity is restricted exclusively to DNS query calls (`dnspython`).
+The test suite must pass with local fixtures and no sibling modules running.

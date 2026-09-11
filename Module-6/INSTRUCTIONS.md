@@ -1,122 +1,191 @@
-# INSTRUCTIONS.md: AI Agent Designing & Coding Standards
-## Module 6: Graph Correlation, Threat Attribution & Persistence Engine
+# INSTRUCTIONS.md: Module 6 Agent Build Brief
+## Graph Correlation, Threat Attribution, and Persistence Engine
 
 ---
 
-## 1. Module Identity & Architectural Boundary
-* **Module Name:** `module-6-graph-attribution`
-* **Owner:** Member 6 (Backend Dev 4)
-* **Framework Stack:** Python 3.11+, Celery, Redis, Neo4j (`neo4j` driver / Cypher), PostgreSQL (`asyncpg` / SQLAlchemy 2.0), Elasticsearch (`elasticsearch-py`), Pydantic V2.
-* **Core Function:** Consumes parsed findings from Modules 3, 4, and 5 via Celery chord callback, models threat entities (`Email`, `Sender`, `Domain`, `IP`, `URL`, `AttachmentHash`) in Neo4j, executes Cypher cluster queries to discover organized attack campaigns, computes the final unified `composite_risk_score`, and persists structured evidence in PostgreSQL and Elasticsearch.
-* **Isolation Guarantee:** Module 6 acts as the **SOLE** write authority for persistent storage (Neo4j, PostgreSQL, Elasticsearch). It receives input payloads strictly via Celery task execution (`queue_graph_attribution`) and **NEVER** exposes HTTP endpoints directly.
+## 1. Mission
+
+Build the Celery callback worker that turns engine results into persistent forensic intelligence for SIH 26106. Module 6 consumes validated outputs from Modules 3, 4, and 5 through Module 2, writes graph and evidence records, links related campaigns, computes final composite risk, and returns a typed result to Module 2.
+
+This module must be fully buildable without Modules 1, 2, 3, 4, or 5 running. Use `CLAUDE.md` as the source of truth for the task signature and result payload.
 
 ---
 
-## 2. Directory Structure & Code Layout Guidelines
+## 2. Architecture Boundary
 
-When generating or editing code for Module 6, strictly follow this repository layout:
+* Build inside `Module-6/`.
+* Do not create a nested project directory.
+* Do not import code from sibling module directories.
+* Do not expose HTTP endpoints.
+* Own all writes to Neo4j, PostgreSQL, and Elasticsearch.
+* Do not perform header parsing, GeoIP enrichment, URL redirect analysis, or NLP inference.
+* Tests must mock repositories so unit tests run without live databases.
 
+---
+
+## 3. Required Stack
+
+* Python 3.11+
+* Celery
+* Redis
+* Pydantic V2
+* Neo4j Python driver
+* SQLAlchemy 2.0 or `asyncpg`
+* Elasticsearch Python client
+* Tenacity
+* Pytest
+
+---
+
+## 4. File Layout
+
+Create this layout directly under `Module-6/`:
+
+```text
+app/
+  worker.py
+  core/config.py
+  core/celery_app.py
+  graph/node_builder.py
+  graph/cypher_queries.py
+  graph/campaign_clustering.py
+  scoring/composite_risk.py
+  persistence/postgres_repo.py
+  persistence/es_indexer.py
+  persistence/graph_repo.py
+  schemas/input_schema.py
+  schemas/output_schema.py
+  utils/neo4j_client.py
+  utils/pg_client.py
+  utils/es_client.py
+contracts/
+  module3-header-result.sample.json
+  module4-geoip-result.sample.json
+  module5-nlp-result.sample.json
+  module6-graph-result.sample.json
+tests/
+  test_input_schema.py
+  test_node_builder.py
+  test_cypher_queries.py
+  test_campaign_clustering.py
+  test_composite_risk.py
+  test_persistence_repos.py
+  test_worker_task.py
+requirements.txt
+Dockerfile
+docker-compose.yml
 ```
-module-6-graph-attribution/
-├── app/
-│   ├── worker.py                   # Celery worker entrypoint & chord callback task
-│   ├── core/
-│   │   ├── config.py               # Database URIs, credentials, and scoring weights
-│   │   └── celery_app.py           # Celery application instance configured for queue_graph_attribution
-│   ├── graph/
-│   │   ├── node_builder.py         # Converts engine payloads into typed Neo4j graph nodes
-│   │   ├── cypher_queries.py       # Parametrized Cypher query templates (MERGE, MATCH, OPTIONAL MATCH)
-│   │   └── campaign_clustering.py  # Graph community detection & infrastructure link analyzer
-│   ├── scoring/
-│   │   └── composite_risk.py       # Weighted Risk Score matrix calculation
-│   ├── persistence/
-│   │   ├── postgres_repo.py        # Case metadata, audit log, and status persistence
-│   │   └── es_indexer.py           # Full-text indexing for raw headers, subject, and text bodies
-│   ├── schemas/
-│   │   └── output_schema.py        # Strict Pydantic model for final aggregated payload
-│   └── utils/
-│       ├── neo4j_client.py         # Thread-safe Neo4j driver connection pool
-│       ├── pg_client.py            # Async SQLAlchemy / asyncpg engine session manager
-│       └── es_client.py            # Elasticsearch async client wrapper
-├── tests/
-│   ├── test_node_builder.py
-│   ├── test_cypher_queries.py
-│   ├── test_campaign_clustering.py
-│   └── test_composite_risk.py
-├── requirements.txt
-└── Dockerfile
+
+`docker-compose.yml` may start Redis, Neo4j, PostgreSQL, and Elasticsearch for optional integration testing. Unit tests must pass without it.
+
+---
+
+## 5. Input and Output Mapping
+
+### Inputs Consumed
+
+| Source | Transport | Data | Local owner |
+| --- | --- | --- | --- |
+| Module 2 | Celery callback `tasks.module6_graph_correlation_and_persist` | `results`, `case_id` | `app/worker.py` |
+| Module 3 fixture/result | Serialized dict | Header scores, sender, hashes, attachments, hop chain, raw headers | `schemas/input_schema.py` |
+| Module 4 fixture/result | Serialized dict | Geo score, hop metadata, domain intel | `schemas/input_schema.py` |
+| Module 5 fixture/result | Serialized dict | Content score, classification, summary, URLs | `schemas/input_schema.py` |
+
+### Outputs Produced
+
+| Destination | Transport | Data | Required behavior |
+| --- | --- | --- | --- |
+| Module 2 | Celery result | Module 6 payload from `CLAUDE.md` | Always Pydantic-validated |
+| Module 2 | Celery result | `graph_projection` | Compatible with Module 1 `NetworkGraphData` |
+| Neo4j | Driver writes | nodes and relationships | Idempotent `MERGE` only |
+| PostgreSQL | Repository writes | case metadata, score, audit trail | Transactional and retryable |
+| Elasticsearch | Index writes | raw headers, text summary, sender, subject | Failure must degrade, not crash completed DB writes |
+
+---
+
+## 6. Implementation Requirements
+
+1. Validate every input payload with Pydantic before graph or score logic runs.
+2. Accept `FAILED` or `DEGRADED` upstream results and continue with default score `0.0` for that input.
+3. Build normalized entities for Email, Sender, Domain, IPAddress, URL, Attachment, Campaign, and ThreatActor.
+4. Use parameterized Cypher query builders only.
+5. Use `MERGE` for every node and relationship write.
+6. Bound campaign-clustering traversals to depth 1 through 3 and high-fidelity relationships only.
+7. Compute `graph_reputation_score` from historical matches on IPs, URLs, attachments, domains, and campaigns.
+8. Compute and clamp `composite_score` with the formula in `CLAUDE.md`.
+9. Persist PostgreSQL metadata and audit trail in one transaction.
+10. Treat Elasticsearch indexing failure as `DEGRADED`, not `FAILED`, when PostgreSQL and graph writes succeed.
+11. Return `graph_projection` so Module 2 can serve graph data without knowing Neo4j internals.
+12. Sanitize error output.
+
+---
+
+## 7. Graph Model Requirements
+
+Use these Neo4j labels:
+
+```text
+Email, Sender, Domain, IPAddress, URL, Attachment, Campaign, ThreatActor
 ```
 
----
+Use these relationships:
 
-## 3. Designing & Coding Standards
+```text
+HAS_SENDER, BELONGS_TO, SENT_VIA_IP, RELAYED_THROUGH, HAS_REPLY_TO, CONTAINS_LINK, HAS_ATTACHMENT, LINKED_TO_CAMPAIGN, ATTRIBUTED_TO
+```
 
-### A. Neo4j Property Graph Model Design
-1. **Node Schema Definitions:**
-   * `(:Email {id: case_id, hash: sha256, timestamp: ISO8601, subject: str})` (populated from Module 3 payload)
-   * `(:Sender {email: str})`
-   * `(:Domain {name: str, creation_age: int, is_new: bool})`
-   * `(:IPAddress {ip: str, country: str, asn: str, is_vpn: bool, is_tor: bool})`
-   * `(:URL {url: str, final_url: str, risk_score: float})`
-   * `(:Attachment {sha256: str, name: str})`
-   * `(:Campaign {id: str, name: str, first_seen: ISO8601})`
-   * `(:ThreatActor {id: str, alias: str, confidence: float})`
+Never write unbounded graph traversal queries. Never interpolate raw strings into Cypher.
 
-2. **Relationship Schema Definitions:**
-   * `(:Email)-[:HAS_SENDER]->(:Sender)`
-   * `(:Sender)-[:BELONGS_TO]->(:Domain)`
-   * `(:Email)-[:SENT_VIA_IP]->(:IPAddress)`
-   * `(:Email)-[:RELAYED_THROUGH]->(:IPAddress)`
-   * `(:Email)-[:HAS_REPLY_TO]->(:Sender)`
-   * `(:Email)-[:CONTAINS_LINK]->(:URL)`
-   * `(:Email)-[:HAS_ATTACHMENT]->(:Attachment)`
-   * `(:Email)-[:LINKED_TO_CAMPAIGN]->(:Campaign)`
-
-3. **Cypher Idempotency Standard (CRITICAL):**
-   * **ALL** Cypher write queries MUST use `MERGE` instead of `CREATE` to ensure nodes and relationships are never duplicated upon re-processing.
-   * **Example Pattern:**
-     ```cypher
-     MERGE (e:Email {id: $case_id})
-     ON CREATE SET e.hash = $sha256, e.subject = $subject, e.timestamp = $timestamp
-     MERGE (s:Sender {email: $sender_email})
-     MERGE (e)-[:HAS_SENDER]->(s)
-     ```
-
-### B. Campaign Clustering & Link Analysis
-1. **Cluster Query Execution (Query Bounding Guardrail):**
-   * Execute scoped Cypher path traversal queries (`MATCH path = (e1:Email)-[:SENT_VIA_IP|:HAS_ATTACHMENT|:CONTAINS_LINK*1..3]-(e2:Email) WHERE e1.id <> e2.id RETURN path`) to discover shared high-fidelity infrastructure without query path explosion across generic relay nodes.
-   * Calculate `graph_reputation_score` (0.0 to 100.0) based on the number of historical malicious cases connected to the same infrastructure.
-
-### C. Unified Composite Risk Score Formula
-Calculate `composite_score` (0.0 to 100.0) using normalized engine weights:
-$$	ext{Composite Score} = (S_{	ext{Header}} 	imes 0.25) + (S_{	ext{Geo}} 	imes 0.25) + (S_{	ext{Content}} 	imes 0.30) + (S_{	ext{Graph}} 	imes 0.20)$$
-
-* Determine **Threat Level**:
-  * `0.0 - 29.9`: `CLEAN`
-  * `30.0 - 59.9`: `SUSPICIOUS`
-  * `60.0 - 84.9`: `HIGH_RISK`
-  * `85.0 - 100.0`: `CRITICAL`
-
-### D. Relational & Search Storage (PostgreSQL & Elasticsearch)
-1. **PostgreSQL:** Persist case state, status, execution timestamps, and structured JSON metrics.
-2. **Elasticsearch:** Index raw headers, extracted body text, and sender strings into index `sih_email_forensics_v1` for instant multi-field search support.
+Map internal graph labels to frontend projection types as follows: `Email -> EMAIL`, `Sender -> SENDER`, `Domain -> DOMAIN`, `IPAddress -> IP`, `URL -> URL`, `Attachment -> ATTACHMENT_HASH`, `Campaign -> CAMPAIGN`, `ThreatActor -> THREAT_ACTOR`.
 
 ---
 
-## 4. Error Handling & Guardrails
+## 8. Testing Requirements
 
-1. **Database Lock & Connection Resiliency:**
-   * Neo4j driver connection timeouts MUST be configured with `max_connection_lifetime=300` and `connection_timeout=5.0` seconds.
-   * Wrap Neo4j and PostgreSQL queries in retry decorators (`tenacity`) to automatically retry on transient connection blips.
-2. **Missing Input Fault Tolerance:**
-   * If input payload from any engine worker (Mod 3, Mod 4, or Mod 5) is marked `FAILED` or missing key fields, default those score inputs to `0.0`, record an anomaly flag, and proceed with persistence.
+Write tests for:
+
+* Pydantic validation of Module 3, 4, and 5 fixture inputs
+* Missing or failed upstream input fallback
+* Node and relationship construction
+* Cypher query parameterization and `MERGE` usage
+* Campaign clustering depth bounds
+* Composite risk score thresholds
+* Partial persistence failure handling
+* `graph_projection` compatibility with Module 1 graph contract
+* Worker task success, degraded, and failed outputs
 
 ---
 
-## 5. Testing & Quality Requirements
+## 9. Environment Variables
 
-1. Test coverage must include Cypher query parameter validation, composite risk score calculations, and mock driver persistence tests.
-2. Run test suite:
-   ```bash
-   pytest tests/ -v --cov=app
-   ```
+```bash
+REDIS_URL="redis://localhost:6379/0"
+CELERY_BROKER_URL="redis://localhost:6379/0"
+CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+CELERY_TASK_ALWAYS_EAGER="false"
+NEO4J_URI="bolt://localhost:7687"
+NEO4J_USER="neo4j"
+NEO4J_PASSWORD="password"
+NEO4J_MAX_POOL_SIZE="50"
+POSTGRES_URL="postgresql+asyncpg://postgres:postgres@localhost:5432/sih_forensics"
+ELASTICSEARCH_URL="http://localhost:9200"
+ES_INDEX_NAME="sih_email_forensics_v1"
+EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
+```
+
+Do not commit production secrets.
+
+---
+
+## 10. Independent Compile Gate
+
+Run these commands from `Module-6/` before handing off:
+
+```bash
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.core.celery_app import celery_app; print(celery_app.main)"
+```
+
+The test suite must pass with mocked repositories and no sibling modules running. Optional integration verification may run `docker-compose up -d redis neo4j postgres elasticsearch` before database-backed tests.

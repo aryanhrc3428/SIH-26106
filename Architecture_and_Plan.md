@@ -187,11 +187,19 @@ graph LR
 * Establish weighted relationships (`[:HAS_SENDER]`, `[:BELONGS_TO]`, `[:SENT_VIA_IP]`, `[:RELAYED_THROUGH]`, `[:CONTAINS_LINK]`, `[:HAS_ATTACHMENT]`, `[:LINKED_TO_CAMPAIGN]`, `[:HAS_REPLY_TO]`).
 * Compute final unified `composite_score` (0.0 - 100.0) and threat level.
 * Run scoped community detection algorithms (`[:SENT_VIA_IP|:HAS_ATTACHMENT|:CONTAINS_LINK*1..3]`) to group emails into attack campaigns without query path explosion.
+* Return a Module 1 compatible `graph_projection` to Module 2 so graph data can be served without exposing Neo4j internals across module boundaries.
 
 ### 4.6 Module 1 & Module 2: Analyst Dashboard & Forensic Reporting Engine (`MOD-01`, `MOD-02`)
 * Module 1 (Next.js Dashboard): Visual Hop Trace map, composite Risk Matrix, Cytoscape network graph, and raw RFC header inspector.
-* Module 2 (FastAPI Gateway): Sole REST network boundary, Celery task orchestrator (chord execution), graph proxy endpoint (`GET /api/v1/cases/{case_id}/graph`), and ReportLab tamper-evident PDF / JSON evidence report exporter.
+* Module 2 (FastAPI Gateway): Sole REST network boundary, Celery task orchestrator (chord execution), graph proxy endpoint (`GET /api/v1/cases/{case_id}/graph`) backed by Module 6 graph projections or read-only graph queries, and ReportLab tamper-evident PDF / JSON evidence report exporter.
 * Evidence Staging: Shared storage volume (`EVIDENCE_STAGING_DIR`) ensuring seamless evidence file access across containerized Celery worker containers.
+
+### 4.7 Module Independence Contract
+* Each module must be implemented inside its own `Module-N/` directory without importing source code from sibling modules.
+* Each module must include local contract fixtures so it can compile, run tests, and demonstrate its core behavior before other modules are available.
+* `CLAUDE.md` in each module defines the integration contract: exact inputs consumed, outputs produced, failure payloads, and completion gates.
+* `INSTRUCTIONS.md` in each module defines the implementation brief: local file layout, stack, module responsibilities, tests, and independent compile commands.
+* Cross-module communication must use the documented HTTP endpoints, Celery task names, serialized JSON payloads, shared evidence file paths, or database read/write ownership rules only.
 
 ---
 

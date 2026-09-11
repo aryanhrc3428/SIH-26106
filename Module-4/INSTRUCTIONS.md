@@ -1,106 +1,179 @@
-# INSTRUCTIONS.md: AI Agent Designing & Coding Standards
-## Module 4: GeoIP & Domain Infrastructure Intel Engine
+# INSTRUCTIONS.md: Module 4 Agent Build Brief
+## GeoIP and Domain Infrastructure Intelligence Engine
 
 ---
 
-## 1. Module Identity & Architectural Boundary
-* **Module Name:** `module-4-geoip-intel`
-* **Owner:** Member 4 (Backend Dev 2)
-* **Framework Stack:** Python 3.11+, Celery, Redis, MaxMind `geoip2` / GeoLite2, `python-whois`, `dnspython`, `httpx`, `ipaddress`, Pydantic V2.
-* **Core Function:** Isolates public originating IP addresses from hop chains, resolves IP-to-location/ISP/ASN metadata, flags threat infrastructure (Tor, VPN, Proxies, Cloud Relays), conducts WHOIS domain age checks, and calculates `geo_risk_score`.
-* **Isolation Guarantee:** Module 4 operates strictly as a background worker consuming tasks from Redis queue `queue_geoip_intel`. It **NEVER** exposes HTTP endpoints directly and **NEVER** interacts directly with Module 1, Module 3, Module 5, or Module 6.
+## 1. Mission
+
+Build the Celery worker that performs infrastructure intelligence for SIH 26106. Module 4 receives a case id, staged evidence path, and optional hop chain from Module 2. It identifies the earliest reliable public origin IP, enriches relay hops with GeoIP and ASN data, flags suspicious infrastructure, inspects sender-domain registration signals, and returns a typed payload.
+
+This module must be fully buildable without Modules 1, 2, 3, 5, or 6 running. Use `CLAUDE.md` as the source of truth for the task signature and result payload.
 
 ---
 
-## 2. Directory Structure & Code Layout Guidelines
+## 2. Architecture Boundary
 
-When generating or editing code for Module 4, strictly follow this layout:
+* Build inside `Module-4/`.
+* Do not create a nested project directory.
+* Do not import code from sibling module directories.
+* Do not expose HTTP endpoints.
+* Do not write to databases or graph stores.
+* Do not require Module 3 output; parse headers locally when `raw_hop_chain` is missing.
+* All external lookup clients must be wrapped so tests can run offline.
 
+---
+
+## 3. Required Stack
+
+* Python 3.11+
+* Celery
+* Redis
+* Pydantic V2
+* `geoip2`
+* `python-whois`
+* `dnspython`
+* `httpx`
+* `ipaddress`
+* Pytest
+
+---
+
+## 4. File Layout
+
+Create this layout directly under `Module-4/`:
+
+```text
+app/
+  worker.py
+  core/config.py
+  core/celery_app.py
+  intel/header_reader.py
+  intel/ip_filter.py
+  intel/geoip_resolver.py
+  intel/threat_infra.py
+  intel/whois_checker.py
+  intel/typosquat_checker.py
+  schemas/output_schema.py
+  utils/http_client.py
+  utils/ip_utils.py
+contracts/
+  module4-geoip-result.sample.json
+data/
+  GeoLite2-City.mmdb
+  GeoLite2-ASN.mmdb
+  tor_exit_nodes.txt
+  target_brands.json
+tests/
+  fixtures/multihop.eml
+  test_header_reader.py
+  test_ip_filter.py
+  test_geoip_resolver.py
+  test_threat_infra.py
+  test_whois_checker.py
+  test_typosquat_checker.py
+  test_worker_task.py
+requirements.txt
+Dockerfile
 ```
-module-4-geoip-intel/
-├── app/
-│   ├── worker.py                   # Celery worker entrypoint & task definitions
-│   ├── core/
-│   │   ├── config.py               # Pydantic settings for GeoIP DB paths & API keys
-│   │   └── celery_app.py           # Celery application instance configured for queue_geoip_intel
-│   ├── intel/
-│   │   ├── ip_filter.py            # RFC 1918 / Loopback / Bogon IP filtering algorithm
-│   │   ├── geoip_resolver.py       # MaxMind GeoLite2 MMDB offline reader service
-│   │   ├── threat_infra.py         # Tor exit list, VPN, and proxy indicator matcher
-│   │   ├── whois_checker.py        # WHOIS domain age & registrar extractor
-│   │   └── typosquat_checker.py    # Levenshtein distance & homograph domain analyzer
-│   ├── schemas/
-│   │   └── output_schema.py        # Strict Pydantic output model for task completion payload
-│   └── utils/
-│       ├── http_client.py          # Asynchronous HTTP client with 2.0s hard timeouts
-│       └── ip_utils.py             # Subnet matching and CIDR helpers
-├── data/
-│   ├── GeoLite2-City.mmdb          # MaxMind offline city database
-│   ├── GeoLite2-ASN.mmdb           # MaxMind offline ASN database
-│   ├── tor_exit_nodes.txt          # Cached list of active Tor exit IPs
-│   └── target_brands.json          # Dictionary of target corporate domains for typosquatting checks
-├── tests/
-│   ├── test_ip_filter.py
-│   ├── test_geoip_resolver.py
-│   ├── test_whois_checker.py
-│   └── test_typosquat.py
-├── requirements.txt
-└── Dockerfile
+
+Large binary MMDB files may be documented as setup prerequisites if they are too large to commit. Tests must pass without them by mocking the resolver or using a tiny local fixture.
+
+---
+
+## 5. Input and Output Mapping
+
+### Inputs Consumed
+
+| Source | Transport | Data | Local owner |
+| --- | --- | --- | --- |
+| Module 2 | Celery task `tasks.module4_geoip_analysis` | `case_id`, `file_path`, optional `raw_hop_chain` | `app/worker.py` |
+| Local file | Staged `.eml` or `.msg` | `Received` headers and sender domain | `intel/header_reader.py` |
+| Local data | MMDB, Tor list, target brand list | GeoIP, Tor, typosquat enrichment | `data/` |
+| Optional external lookup | WHOIS, AbuseIPDB-style API | Domain and abuse enrichment | wrapped service clients |
+
+### Outputs Produced
+
+| Destination | Transport | Data | Required behavior |
+| --- | --- | --- | --- |
+| Module 2 | Celery result | GeoIP/domain payload from `CLAUDE.md` | Always Pydantic-validated |
+| Module 2 | Celery result | Degraded/failure payload | Include sanitized `error` only |
+
+---
+
+## 6. Implementation Requirements
+
+1. Normalize hop-chain input into chronological order, origin first.
+2. When `raw_hop_chain` is `None`, parse all `Received` headers from `file_path`.
+3. Filter private, loopback, link-local, multicast, reserved, CGNAT, and documentation ranges with `ipaddress`.
+4. Select the earliest IP where `ipaddress.ip_address(value).is_global` is true.
+5. Resolve city, country, latitude, longitude, ASN, and ISP from local MMDB readers when available.
+6. Return deterministic `UNKNOWN` or `null` fields when MMDB data is absent.
+7. Match Tor exit nodes from `data/tor_exit_nodes.txt`.
+8. Flag likely VPN/proxy/cloud relay infrastructure from local indicators first, then optional API data.
+9. Extract sender domain locally from headers and perform WHOIS age checks with timeouts.
+10. Detect typosquatting with Levenshtein distance and IDN homograph/punycode checks.
+11. Calculate and clamp `geo_risk_score`.
+12. Return `DEGRADED` for missing enrichment and `FAILED` only when evidence cannot be read.
+
+Do not use RFC 5737 documentation IP ranges such as `192.0.2.0/24`, `198.51.100.0/24`, or `203.0.113.0/24` as positive public-origin tests because Python may correctly reject them as non-global.
+
+---
+
+## 7. Timeout and Offline Rules
+
+* WHOIS timeout: `2.0` seconds.
+* HTTP timeout: `2.0` seconds.
+* If WHOIS fails, set `domain_age_days=null` and continue.
+* If MMDB is unavailable, keep hop rows and fill GeoIP fields with `UNKNOWN` or `null`.
+* Tests must not depend on live WHOIS, live HTTP, or real MaxMind databases.
+
+---
+
+## 8. Testing Requirements
+
+Write tests for:
+
+* Public versus private IP filtering
+* CGNAT, loopback, link-local, multicast, and reserved IP rejection
+* Header parsing fallback when `raw_hop_chain` is missing
+* Earliest reliable public IP selection
+* MMDB success and missing-file fallback
+* Tor node matching
+* VPN/proxy/cloud relay matching
+* WHOIS age calculation and timeout fallback
+* Typosquat and punycode homograph detection
+* Worker task success, degraded, and failed outputs
+
+---
+
+## 9. Environment Variables
+
+```bash
+REDIS_URL="redis://localhost:6379/0"
+CELERY_BROKER_URL="redis://localhost:6379/0"
+CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+CELERY_TASK_ALWAYS_EAGER="false"
+GEOIP_CITY_DB_PATH="data/GeoLite2-City.mmdb"
+GEOIP_ASN_DB_PATH="data/GeoLite2-ASN.mmdb"
+ABUSEIPDB_API_KEY=""
+HTTP_TIMEOUT_SECONDS="2.0"
+WHOIS_TIMEOUT_SECONDS="2.0"
+EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
 ```
 
----
-
-## 3. Designing & Coding Standards
-
-### A. IP Extraction & Filtering Logic
-1. **Bogon & RFC 1918 Filtering (CRITICAL):**
-   * Use Python's `ipaddress` module (`ipaddress.ip_address(ip).is_global`).
-   * Filter out private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), loopback (`127.0.0.1`), link-local (`169.254.0.0/16`), and carrier-grade NAT (`100.64.0.0/10`).
-   * If `raw_hop_chain` parameter is `None` (during parallel Celery chord execution), independently parse `Received` headers from the raw EML/MSG file at `file_path`.
-   * Select the **earliest reliable public IP address** in the `Received` hop chain as the candidate originating IP.
-
-### B. GeoIP & ASN Resolution
-1. **Local MMDB Reader (Sub-Millisecond Performance):**
-   * Use MaxMind `geoip2.database.Reader` reading local `.mmdb` binary files for City and ASN lookups.
-   * Extracts: Country ISO Code, City Name, Latitude, Longitude, Autonomous System Number (ASN), and Autonomous System Organization (ISP/Host).
-
-### C. Threat Infrastructure & Anomaly Detection
-1. **Tor & VPN Detection:**
-   * Tor: Match IP against local cached `tor_exit_nodes.txt` list.
-   * VPN / Proxy: Query cached AbuseIPDB API or match against known cloud server ASN ranges (AWS AS16509, GCP AS15169, Azure AS8075).
-2. **Domain WHOIS & Registration Age:**
-   * Extract domain from sender email (`Header-From`).
-   * Execute WHOIS query using `python-whois`.
-   * Calculate domain creation age in days (`(now - creation_date).days`).
-   * Flag domains created less than **30 days** ago as high-risk newly registered domains (NRDs).
-3. **Typosquatting & Homograph Detection:**
-   * Calculate Levenshtein edit distance between sender domain and target brand domain list in `data/target_brands.json` (e.g., `micros0ft.com` vs `microsoft.com`).
-   * Detect IDN homograph punycode attacks (`xn--...`).
+Do not commit real API keys.
 
 ---
 
-## 4. Error Handling & Guardrails
+## 10. Independent Compile Gate
 
-1. **WHOIS & External API Timeout Guardrails (CRITICAL):**
-   * All outbound WHOIS or HTTP API queries MUST enforce `timeout=2.0` seconds.
-   * If WHOIS lookup fails or times out, set `domain_age_days = null` and continue processing without throwing unhandled exceptions.
-2. **Offline MMDB Fallback:**
-   * If local `.mmdb` file is missing or unreadable, log an error, assign fallback values (`Country: UNKNOWN`, `City: UNKNOWN`), and proceed.
-3. **Geo-Risk Score Calculation & Clamping:**
-   * `geo_risk_score` (0.0 to 100.0) calculated dynamically based on weights:
-     * Tor Exit Node: +40
-     * VPN / Anonymous Proxy: +25
-     * Domain Creation Age < 30 Days: +30
-     * Typosquatting / Homograph Flag: +25
-     * High-Risk Country / Hosting ASN: +15
-   * **Score Clamping:** Standardize score output using `geo_risk_score = min(calculated_score, 100.0)`.
+Run these commands from `Module-4/` before handing off:
 
----
+```bash
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.core.celery_app import celery_app; print(celery_app.main)"
+```
 
-## 5. Testing & Quality Requirements
-
-1. Test coverage must include public IPs, internal private IPs, newly registered domains, and homograph spoofing test cases.
-2. Run test suite:
-   ```bash
-   pytest tests/ -v --cov=app
-   ```
+The test suite must pass with mocked lookups and no sibling modules running.

@@ -1,122 +1,191 @@
-# INSTRUCTIONS.md: AI Agent Designing & Coding Standards
-## Module 2: API Gateway, Async Orchestration & Forensic Reporting
+# INSTRUCTIONS.md: Module 2 Agent Build Brief
+## API Gateway, Async Orchestration, and Forensic Reporting
 
 ---
 
-## 1. Module Identity & Architectural Boundary
-* **Module Name:** `module-2-mediator`
-* **Owner:** Member 2 (Mediator / Integration Lead)
-* **Framework Stack:** Python 3.11+, FastAPI, Pydantic V2, Celery, Redis (Broker & Result Backend), ReportLab (PDF Generation), PyJWT, HTTPX.
-* **Core Function:** Functions as the central API Gateway, Task Orchestrator, and Interface Mediator. It exposes REST API contracts to Module 1 (Frontend), dispatches asynchronous work units to Backend Engine Workers (Modules 3, 4, 5, and 6) via Redis message queues, aggregates engine findings into unified payloads, and compiles court-ready PDF evidence reports.
-* **Isolation Guarantee:** Module 2 acts as the **SOLE** network boundary facing Module 1. It encapsulates all backend implementation details. Backend Modules 3, 4, 5, and 6 NEVER expose public HTTP endpoints directly to Module 1.
+## 1. Mission
+
+Build the FastAPI gateway for SIH 26106. Module 2 accepts email evidence from Module 1, stages the files, dispatches Celery work to Modules 3, 4, and 5, invokes Module 6 as the final callback, aggregates all findings, and exports PDF/JSON forensic reports.
+
+This module must be fully buildable without any sibling module running. Use `CLAUDE.md` as the source of truth for all interfaces.
 
 ---
 
-## 2. Directory Structure & Code Layout Guidelines
+## 2. Architecture Boundary
 
-When generating or modifying code for Module 2, strictly follow this repository layout:
+* Build inside `Module-2/`.
+* Do not create a nested project directory.
+* Do not import code from sibling module directories.
+* Expose public HTTP only to Module 1.
+* Communicate with Modules 3, 4, 5, and 6 only through Celery task names and serialized payloads.
+* Do not implement header parsing, GeoIP lookup, NLP inference, graph writes, or database persistence owned by other modules.
+* Module 2 may read from persistence stores in integrated mode but must not write to Neo4j, PostgreSQL, or Elasticsearch.
 
+---
+
+## 3. Required Stack
+
+* Python 3.11+
+* FastAPI
+* Pydantic V2 and Pydantic Settings
+* Celery
+* Redis
+* ReportLab
+* PyJWT
+* HTTPX
+* Pytest
+
+---
+
+## 4. File Layout
+
+Create this layout directly under `Module-2/`:
+
+```text
+app/
+  main.py
+  core/config.py
+  core/security.py
+  core/celery_app.py
+  core/redis.py
+  api/v1/router.py
+  api/v1/endpoints/ingest.py
+  api/v1/endpoints/cases.py
+  api/v1/endpoints/graph.py
+  api/v1/endpoints/reports.py
+  schemas/frontend_contracts.py
+  schemas/engine_payloads.py
+  schemas/requests.py
+  tasks/pipeline.py
+  tasks/pdf_generator.py
+  services/aggregator.py
+  services/storage.py
+  services/mock_results.py
+  utils/crypto.py
+  utils/formatters.py
+contracts/
+  module3-header-result.sample.json
+  module4-geoip-result.sample.json
+  module5-nlp-result.sample.json
+  module6-graph-result.sample.json
+  analysis-result.sample.json
+tests/
+  test_ingest_api.py
+  test_orchestrator.py
+  test_aggregator.py
+  test_pdf_generator.py
+requirements.txt
+Dockerfile
 ```
-module-2-mediator/
-├── app/
-│   ├── main.py                     # FastAPI app factory, CORS, and middleware setup
-│   ├── core/
-│   │   ├── config.py               # BaseSettings using Pydantic Settings
-│   │   ├── security.py             # JWT authentication & RBAC middleware
-│   │   ├── celery_app.py           # Celery instance, queue configs & task routing
-│   │   └── redis.py                # Async Redis connection pool manager
-│   ├── api/
-│   │   ├── v1/
-│   │   │   ├── router.py           # Main V1 Router aggregation
-│   │   │   ├── endpoints/
-│   │   │   │   ├── ingest.py       # EML/MSG upload & SHA-256 hashing pre-flight
-│   │   │   │   ├── cases.py        # Case status polling & aggregated report endpoints
-│   │   │   │   ├── graph.py        # Proxy endpoint for Graph topology data
-│   │   │   │   └── reports.py      # PDF / JSON report export trigger
-│   ├── schemas/
-│   │   ├── frontend_contracts.py   # Strict response models for Module 1 UI
-│   │   ├── engine_payloads.py      # Validation models for Modules 3, 4, 5, and 6
-│   │   └── requests.py             # File upload and filtering request schemas
-│   ├── tasks/
-│   │   ├── pipeline.py             # Celery chord/chain workflow orchestrator
-│   │   └── pdf_generator.py        # ReportLab PDF compilation service
-│   ├── services/
-│   │   ├── aggregator.py           # Combines findings from Mod 3, 4, 5, 6 into Risk Matrix
-│   │   └── storage.py              # Stashes raw .eml/.msg evidence temporarily
-│   └── utils/
-│       ├── crypto.py               # SHA-256 calculation & digital signature helpers
-│       └── formatters.py           # Date/time & text sanitization helpers
-├── tests/
-│   ├── test_ingest_api.py
-│   ├── test_orchestrator.py
-│   └── test_pdf_generator.py
-├── requirements.txt
-└── Dockerfile
+
+---
+
+## 5. Input and Output Mapping
+
+### Inputs Consumed
+
+| Source | Transport | Data | Local owner |
+| --- | --- | --- | --- |
+| Module 1 | HTTP multipart | `.eml` or `.msg`, `client_timestamp`, `analyst_id`, optional `client_sha256` | `api/v1/endpoints/ingest.py` |
+| Module 3 | Celery result | Header/authentication payload | `schemas/engine_payloads.py` |
+| Module 4 | Celery result | Hop, GeoIP, ASN, domain intel payload | `schemas/engine_payloads.py` |
+| Module 5 | Celery result | Content classification and URL payload | `schemas/engine_payloads.py` |
+| Module 6 | Celery callback result | Composite score, campaign, persistence payload, `graph_projection` | `schemas/engine_payloads.py` |
+
+### Outputs Produced
+
+| Destination | Transport | Data | Required behavior |
+| --- | --- | --- | --- |
+| Module 1 | `202 POST /api/v1/cases/upload` | `UploadAccepted` | Return after staging and dispatching work |
+| Module 1 | `GET /api/v1/cases/{case_id}/analysis` | `AnalysisResult` | Stable shape for pending, complete, degraded, and failed cases |
+| Module 1 | `GET /api/v1/cases/{case_id}/graph` | `NetworkGraphData` | Fixture-backed in standalone mode, read-only graph query in integration |
+| Module 1 | `GET /api/v1/reports/{case_id}/export` | PDF blob or JSON | Include chain-of-custody metadata |
+| Modules 3, 4, 5 | Celery chord tasks | `case_id`, staged `file_path` | Dispatch in parallel |
+| Module 6 | Celery callback | `results`, `case_id` | Run after Modules 3, 4, and 5 complete |
+
+---
+
+## 6. Implementation Requirements
+
+1. Define Pydantic models for all Module 1 request/response contracts and all worker result contracts.
+2. Reject unsupported uploads before task dispatch.
+3. Calculate and store SHA-256 for each staged file before dispatch.
+4. Use Celery `chord` for parallel execution of Modules 3, 4, and 5, with Module 6 as callback.
+5. Configure task routing by task name and queue name, not by importing worker code.
+6. Add `CELERY_TASK_ALWAYS_EAGER=true` support for tests.
+7. Implement aggregation that creates defaults for missing, failed, or invalid worker outputs.
+8. Cache the latest Module 6 `graph_projection` so the graph endpoint can work without knowing Neo4j internals.
+9. Generate PDF reports from the same validated analysis data returned to Module 1.
+10. Sanitize every public error response.
+
+---
+
+## 7. Required Celery Names
+
+```python
+tasks.module3_header_analysis
+tasks.module4_geoip_analysis
+tasks.module5_nlp_analysis
+tasks.module6_graph_correlation_and_persist
+```
+
+Queue names:
+
+```text
+queue_header_forensics
+queue_geoip_intel
+queue_nlp_fraud
+queue_graph_attribution
 ```
 
 ---
 
-## 3. Designing & Coding Standards
+## 8. Testing Requirements
 
-### A. FastAPI & Pydantic V2 Usage
-1. **Strict Type Annotations:** All functions, endpoint handlers, and service methods MUST be typed with Python 3.11+ syntax (`str | None`, `list[dict[str, Any]]`).
-2. **Async Handlers:** Standard API endpoints must be asynchronous (`async def`). Heavy CPU or blocking disk operations (e.g., ReportLab PDF rendering) MUST be offloaded to Celery background workers.
-3. **Response Schema Enforcement:** All FastAPI path operations MUST explicitly set `response_model=...` matching the contracts defined in `CLAUDE.md`.
+Write tests for:
 
-### B. Async Task Orchestration (Celery + Redis)
-1. **Task Execution Strategy (Parallel Engine Execution):**
-   * Use Celery `chord` primitives: Execute Module 3 (Header), Module 4 (GeoIP), and Module 5 (NLP) in parallel.
-   * Upon completion of the parallel phase, pass all 3 results to Module 6 (Graph Attribution & Storage Engine) as a callback task.
-   * **Task Workflow Primitive:**
-     ```python
-     from celery import chord
-     from app.core.celery_app import celery_app
-
-     def run_forensic_pipeline(case_id: str, file_path: str):
-         # Phase 1: Parallel Engine Analysis (Modules 3, 4, 5)
-         parallel_engines = [
-             celery_app.signature('tasks.module3_header_analysis', args=[case_id, file_path]),
-             celery_app.signature('tasks.module4_geoip_analysis', args=[case_id, file_path]),
-             celery_app.signature('tasks.module5_nlp_analysis', args=[case_id, file_path]),
-         ]
-         # Phase 2: Graph Correlation & Final Aggregation Callback (Module 6)
-         # Note: Celery prepends parallel results list to args, so kwargs binding is used for case_id
-         callback = celery_app.signature('tasks.module6_graph_correlation_and_persist', kwargs={'case_id': case_id})
-         
-         # Execute Chord
-         chord(parallel_engines)(callback)
-     ```
-
-2. **Hard Timeouts:** Every task signature MUST enforce `soft_time_limit=25` and `time_limit=30` seconds to prevent stalled workers from locking the pipeline.
-
-### C. PDF Report Generation Engine (ReportLab)
-1. **Forensic Integrity Standards:**
-   * Generated PDF documents MUST include an **Evidentiary Header** featuring: Case UUID, File Name, Calculated SHA-256 Hash, Generation Timestamp (UTC), and Digital Signature Fingerprint.
-2. **Visual Styling:**
-   * Dark/Professional palette: Deep Navy `#0F172A`, Slate Gray `#475569`, Alert Red `#E11D48`, Accent Cyan `#0891B2`.
-   * Tables: Multi-hop trace tables with explicit column widths, header background fills, and cell word wrapping.
+* Upload validation for extension, size, and malformed multipart input
+* SHA-256 calculation
+* Celery chord construction using task names
+* Aggregator behavior when all workers succeed
+* Aggregator behavior when one worker returns `FAILED`
+* Aggregator behavior when a worker returns invalid JSON
+* Graph endpoint response from cached Module 6 `graph_projection`
+* PDF generation with case id, file name, hash, timestamp, risk score, and hop table
+* Public response sanitization
 
 ---
 
-## 4. Error Handling & Fault Tolerance Standards
+## 9. Environment Variables
 
-1. **Partial Engine Failure Resilience (CRITICAL):**
-   * If one backend module (e.g., Module 5 NLP engine) throws an exception or times out, the Mediator MUST NOT fail the entire case.
-   * The `aggregator.py` service MUST populate default fallback structures for the failed engine, mark the specific sub-status as `DEGRADED`, and attach a critical warning flag in the response payload.
+```bash
+SERVER_HOST="0.0.0.0"
+SERVER_PORT="8000"
+SECRET_KEY="dev_only_change_me"
+ALGORITHM="HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES="480"
+REDIS_URL="redis://localhost:6379/0"
+CELERY_BROKER_URL="redis://localhost:6379/0"
+CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+CELERY_TASK_ALWAYS_EAGER="false"
+EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
+PDF_OUTPUT_DIR="/tmp/sih_pdf_reports"
+MAX_UPLOAD_SIZE_BYTES="26214400"
+```
 
-2. **Standardized HTTP Exceptions:**
-   * `400 Bad Request`: Non-EML/MSG files or corrupted headers.
-   * `413 Payload Too Large`: Files exceeding 25 MB limit.
-   * `422 Unprocessable Entity`: Failed Pydantic schema validation.
-   * `500 Internal Server Error`: Critical pipeline crashes (masked from raw stack traces in production).
+Do not commit production secrets.
 
 ---
 
-## 5. Testing & Verification Requirements
+## 10. Independent Compile Gate
 
-1. **Unit Tests:** Test schema validation, HMAC hash calculations, and PDF generation formatting.
-2. **Integration Tests:** Test FastAPI upload endpoints, task dispatch mock calls, and result retrieval endpoints using `httpx.AsyncClient`.
-3. **Execution Command:**
-   ```bash
-   pytest tests/ -v --cov=app
-   ```
+Run these commands from `Module-2/` before handing off:
+
+```bash
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.main import app; print(app.title)"
+```
+
+The test suite must pass with mocked worker payloads and no sibling modules running.

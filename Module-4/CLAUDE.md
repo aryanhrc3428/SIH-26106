@@ -1,66 +1,90 @@
-# CLAUDE.md: Synced Memory & Module Isolation Interface Contract
-## Module 4: GeoIP & Domain Infrastructure Intel Engine
+# CLAUDE.md: Module 4 Interface Contract
+## Module 4: GeoIP and Domain Infrastructure Intelligence Engine
 
 ---
 
-## 1. Module Overview & Memory Context
+## 1. Contract Purpose
+
+This file is the memory contract for the agent building Module 4. Keep only information required to build the GeoIP/domain intelligence worker independently and integrate with Module 2 later.
+
 * **Module ID:** `MOD-04`
-* **Purpose:** Origin IP Isolation, GeoIP Resolution, Infrastructure Threat Flags (Tor/VPN/Proxy), WHOIS Domain Age, Typosquatting Detection.
-* **Current Version:** `1.0.0-prod`
-* **Owner:** Member 4 (Backend Dev 2)
-* **Ingress Queue:** `queue_geoip_intel`
-* **Orchestrator Target:** Module 2 (Mediator Celery Chord)
+* **Build root:** `Module-4/` (create app files directly here; do not create a nested `module-4-geoip-intel/` directory)
+* **Primary role:** Identify reliable public origin IPs, resolve GeoIP/ASN metadata, flag Tor/VPN/proxy/cloud infrastructure, inspect sender domain age and typosquatting, and score infrastructure risk
+* **Consumes from:** Module 2 Celery task arguments
+* **Produces to:** Module 2 Celery result payload
+* **Never depends on:** Module 1, Module 3, Module 5, Module 6, graph storage, NLP models, or database writes
+
+Before coding, read `../Architecture_and_Plan.md` and `INSTRUCTIONS.md`.
 
 ---
 
-## 2. Ingress Interface Schema (Task Arguments from Module 2)
+## 2. Required Independence
 
-Module 4 listens on Celery signature `tasks.module4_geoip_analysis`.
+Module 4 must compile, run, and pass tests without any other module running.
 
-**Task Parameter Signature:**
+* If `raw_hop_chain` is not provided, parse `Received` headers from `file_path` locally.
+* Extract sender domain from the staged file locally; do not wait for Module 3 output.
+* Use local MaxMind `.mmdb` files when present, with deterministic fallback values when absent.
+* Mock WHOIS, DNS, Tor lists, and HTTP API calls in tests.
+* Never write to PostgreSQL, Neo4j, or Elasticsearch.
+
+---
+
+## 3. Input Mapping: Task Arguments from Module 2
+
+**Task name:** `tasks.module4_geoip_analysis`
+
+**Queue:** `queue_geoip_intel`
+
 ```python
-def module4_geoip_analysis(case_id: str, file_path: str, raw_hop_chain: list[str] | None = None) -> dict[str, Any]:
+def module4_geoip_analysis(
+    case_id: str,
+    file_path: str,
+    raw_hop_chain: list[str] | None = None,
+) -> dict[str, object]:
     ...
 ```
 
-* `case_id`: UUID string identifying the investigation case.
-* `file_path`: Local disk path to the staged raw `.eml` or `.msg` file.
-* `raw_hop_chain`: (Optional) IP address list. When `raw_hop_chain` is `None` (as occurs during parallel Celery chord execution), Module 4 independently parses `Received` headers from the file at `file_path`.
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `case_id` | `str` | Yes | Case UUID assigned by Module 2 |
+| `file_path` | `str` | Yes | Path to staged `.eml` or `.msg` evidence file under `EVIDENCE_STAGING_DIR` |
+| `raw_hop_chain` | `list[str] | None` | No | Chronological hop IP list. When missing, Module 4 must parse `Received` headers itself |
 
 ---
 
-## 3. Egress Interface Schema (Return Payload to Module 2)
+## 4. Output Mapping: Result Returned to Module 2
 
-Module 4 MUST return a dictionary adhering to this exact JSON schema upon task completion:
+Return this shape for successful analysis.
 
 ```json
 {
   "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
   "status": "SUCCESS",
   "geo_risk_score": 90.0,
-  "earliest_reliable_ip": "192.0.2.1",
-  "origin_country": "RU",
-  "origin_city": "Moscow",
+  "earliest_reliable_ip": "93.184.216.34",
+  "origin_country": "US",
+  "origin_city": "Los Angeles",
   "hops": [
     {
       "hop_index": 1,
-      "ip": "192.0.2.1",
-      "hostname": "relay01.evil-server.net",
-      "country": "RU",
-      "city": "Moscow",
-      "latitude": 55.7558,
-      "longitude": 37.6173,
-      "isp": "BadActor Networks LLC",
-      "asn": "AS65534",
+      "ip": "93.184.216.34",
+      "hostname": "relay01.suspicious-example.net",
+      "country": "US",
+      "city": "Los Angeles",
+      "latitude": 34.0522,
+      "longitude": -118.2437,
+      "isp": "Example Hosting LLC",
+      "asn": "AS15133",
       "is_vpn_or_proxy": true,
       "is_tor_exit_node": false,
       "delay_from_prev_ms": 0
     }
   ],
   "domain_intel": {
-    "domain": "evil-server.net",
+    "domain": "suspicious-example.net",
     "domain_age_days": 12,
-    "registrar": "NameCheap Inc.",
+    "registrar": "Example Registrar Inc.",
     "is_newly_registered": true,
     "is_typosquatted": true,
     "target_brand_spoofed": "microsoft.com"
@@ -68,52 +92,74 @@ Module 4 MUST return a dictionary adhering to this exact JSON schema upon task c
 }
 ```
 
----
+### 4.1 Field Rules
 
-## 4. Local Environment Variables (`.env`)
+| Field | Rule |
+| --- | --- |
+| `status` | `SUCCESS`, `DEGRADED`, or `FAILED` |
+| `geo_risk_score` | Float from `0.0` to `100.0`, clamped |
+| `earliest_reliable_ip` | First public global IP in chronological hop order, or `null` when none is reliable |
+| `origin_country`, `origin_city` | `UNKNOWN` or `null` when GeoIP data is unavailable |
+| `hops` | Empty array only when no public hop can be extracted |
+| `domain_intel.domain_age_days` | `null` when WHOIS fails or creation date is unavailable |
+| `domain_intel.target_brand_spoofed` | `null` when no typosquat/homograph match is found |
 
-```bash
-# Redis Queue Target
-REDIS_URL="redis://localhost:6379/0"
-CELERY_BROKER_URL="redis://localhost:6379/0"
-CELERY_RESULT_BACKEND="redis://localhost:6379/1"
+### 4.2 Failure Shape
 
-# GeoIP Local Databases
-GEOIP_CITY_DB_PATH="data/GeoLite2-City.mmdb"
-GEOIP_ASN_DB_PATH="data/GeoLite2-ASN.mmdb"
+If no hop chain or sender domain can be extracted, return a degraded payload when possible:
 
-# Threat Intelligence APIs (Optional Fallback)
-ABUSEIPDB_API_KEY="sample_abuseipdb_api_key_for_dev"
-HTTP_TIMEOUT_SECONDS=2.0
-
-# Staging Storage
-EVIDENCE_STAGING_DIR="/tmp/sih_evidence_staging"
+```json
+{
+  "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+  "status": "DEGRADED",
+  "geo_risk_score": 0.0,
+  "earliest_reliable_ip": null,
+  "origin_country": null,
+  "origin_city": null,
+  "hops": [],
+  "domain_intel": {
+    "domain": null,
+    "domain_age_days": null,
+    "registrar": null,
+    "is_newly_registered": false,
+    "is_typosquatted": false,
+    "target_brand_spoofed": null
+  },
+  "error": {
+    "code": "NO_PUBLIC_ORIGIN",
+    "message": "No reliable public origin IP could be extracted.",
+    "recoverable": true
+  }
+}
 ```
 
+Use `FAILED` only when the task cannot read the evidence file and cannot compute any useful infrastructure result.
+
 ---
 
-## 5. Isolated Running & Testing Commands
+## 5. Scoring Contract
 
-To run and verify Module 4 in total isolation:
+Calculate `geo_risk_score` using these weights, then clamp at `100.0`.
+
+| Signal | Weight |
+| --- | ---: |
+| Tor exit node | 40 |
+| VPN or anonymous proxy | 25 |
+| Domain age under 30 days | 30 |
+| Typosquatting or homograph match | 25 |
+| High-risk hosting ASN or cloud relay anomaly | 15 |
+
+---
+
+## 6. Standalone Completion Gate
+
+Module 4 is ready only when these pass from inside `Module-4/`:
 
 ```bash
-# 1. Ensure Redis is running
-docker run -d -p 6379:6379 --name sih_redis redis:alpine
-
-# 2. Install Dependencies
-pip install -r requirements.txt
-
-# 3. Start Module 4 Celery Worker
-celery -A app.core.celery_app worker --loglevel=info -Q queue_geoip_intel
-
-# 4. Run Pytest Suite
-pytest tests/ -v
+python -m pip install -r requirements.txt
+python -m compileall app tests
+pytest tests/ -v --cov=app
+python -c "from app.core.celery_app import celery_app; print(celery_app.main)"
 ```
 
----
-
-## 6. Zero-Coupling Cross-Module Fault Isolation Rules
-
-1. **Local MMDB Priority:** Always attempt local MMDB binary disk lookups first before attempting network API queries to ensure offline operation capability during judging/testing.
-2. **Strict Execution Timeouts:** Outbound WHOIS/API calls must abort after 2.0 seconds.
-3. **No Direct Database Writes:** Module 4 does not write directly to PostgreSQL or Neo4j. All gathered threat metadata is passed back in the return payload to Module 2 for Module 6 to persist.
+The test suite must pass with local fixtures and mocked external lookups, with no sibling modules running.
