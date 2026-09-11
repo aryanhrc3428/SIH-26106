@@ -1,0 +1,45 @@
+{
+  "case_id": "case_550e8400-e29b-41d4-a716-446655440000",
+  "status": "SUCCESS",
+  "subject": "Urgent Wire Transfer Request",
+  "timestamp": "2026-09-06T12:00:00Z",
+  "hashes": {
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "md5": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "attachment_hashes": [
+    {
+      "name": "invoice.pdf",
+      "sha256": "a3582418e00192e15347ad915d4acf14aa0741e1438d55ab3e59d6cf00d14d00"
+    }
+  ],
+  "header_anomaly_score": 85.0,
+  "spf": {
+    "status": "FAIL",
+    "domain": "spoofed-bank.com",
+    "ip": "192.0.2.1"
+  },
+  "dkim": {
+    "status": "FAIL",
+    "selector": "s1",
+    "domain": "spoofed-bank.com"
+  },
+  "dmarc": {
+    "status": "FAIL",
+    "policy": "reject",
+    "alignment": false
+  },
+  "sender_alignment": {
+    "header_from": "billing@legitbank.com",
+    "envelope_from": "spammer@evil-server.net",
+    "reply_to": "attacker@harvest-site.org",
+    "is_display_name_spoofed": true,
+    "spoofed_entity_detected": "Legitimate Bank Executive"
+  },
+  "raw_hop_chain": [
+    "192.0.2.1",
+    "198.51.100.25",
+    "203.0.113.195"
+  ],
+  "raw_headers": "Received: from relay01.evil-server.net...\nFrom: CEO <billing@legitbank.com>..."
+}

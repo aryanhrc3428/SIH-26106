@@ -1,0 +1,6 @@
+Module-3/CLAUDE.md
+Module-3/INSTRUCTIONS.md
+Module-3/__pycache__/*
+Module-3/tests/*
+Module-3/.coverage
+Module-3/.pytest_cache
